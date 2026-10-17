@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+state/
+evidence/
+release.json
+restore-input/
+infra/*.json
+!infra/*parameters.json

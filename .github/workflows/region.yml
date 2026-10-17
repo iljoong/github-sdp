@@ -1,0 +1,82 @@
+name: Protected regional rollout
+on:
+  workflow_call:
+    inputs:
+      region:
+        required: true
+        type: string
+      environment:
+        required: true
+        type: string
+      profile:
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+jobs:
+  rollout:
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.environment }}
+    timeout-minutes: 240
+    env:
+      REGION: ${{ inputs.region }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      RESOURCE_GROUP: ${{ vars.RESOURCE_GROUP }}
+      CONTAINER_APP: ${{ vars.CONTAINER_APP }}
+      LOG_ANALYTICS_WORKSPACE_ID: ${{ vars.LOG_ANALYTICS_WORKSPACE_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-${{ github.run_id }}
+          path: .
+      - uses: azure/login@8c334a195cbb38e46038007b304988d888bf676a
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Verify required Azure CLI commands
+        run: |
+          az version
+          az extension show --name log-analytics >/dev/null 2>&1 || az extension add --name log-analytics --yes
+          az containerapp revision copy --help >/dev/null
+          az monitor log-analytics query --help >/dev/null
+      - name: Capture exact stable state (read only)
+        run: python scripts/snapshot.py
+      - name: Persist baseline BEFORE ANY Azure mutation
+        id: baseline-upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-${{ github.run_id }}-${{ inputs.region }}
+          path: state/baseline-${{ inputs.region }}.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Progressive rollout and guarded automatic rollback
+        id: rollout
+        env:
+          PROFILE: ${{ inputs.profile }}
+        run: python scripts/rollout.py deploy --profile "$PROFILE" --snapshot "state/baseline-$REGION.json"
+      - name: Best-effort cleanup after error or cancellation
+        if: ${{ always() && steps.baseline-upload.outcome == 'success' && steps.rollout.outcome != 'success' }}
+        timeout-minutes: 8
+        run: |
+          if test -f "evidence/$REGION/mutation-intent.json"; then
+            python scripts/rollout.py restore --snapshot "state/baseline-$REGION.json"
+          else
+            echo "No mutation intent: preflight did not authorize rollout; leave Azure unchanged."
+          fi
+      - name: Preserve regional gate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-${{ github.run_id }}-${{ inputs.region }}-${{ github.run_attempt }}
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 90

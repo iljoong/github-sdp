@@ -1,0 +1,66 @@
+name: Restore one protected region
+on:
+  workflow_call:
+    inputs:
+      region:
+        type: string
+        required: true
+      environment:
+        type: string
+        required: true
+      source_run_id:
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+jobs:
+  restore:
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.environment }}
+    timeout-minutes: 20
+    env:
+      REGION: ${{ inputs.region }}
+      SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      RESOURCE_GROUP: ${{ vars.RESOURCE_GROUP }}
+      CONTAINER_APP: ${{ vars.CONTAINER_APP }}
+      LOG_ANALYTICS_WORKSPACE_ID: ${{ vars.LOG_ANALYTICS_WORKSPACE_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Verify source is this repository's completed main release
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/check_source.py
+      - uses: actions/download-artifact@v4
+        with:
+          name: baseline-${{ inputs.source_run_id }}-${{ inputs.region }}
+          path: restore-input
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_run_id }}
+      - name: Bind snapshot to verified source commit and run
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          python -c 'import os; from scripts.common import load, require; s=load("restore-input/baseline-"+os.environ["REGION"]+".json"); require(s["commit"]==os.environ["SOURCE_SHA"] and s["run_id"]==os.environ["SOURCE_RUN_ID"], "Wrong snapshot origin")'
+      - uses: azure/login@8c334a195cbb38e46038007b304988d888bf676a
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Guard drift; restore traffic; verify old business endpoint
+        run: python scripts/rollout.py restore --snapshot "restore-input/baseline-$REGION.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: restore-evidence-${{ github.run_id }}-${{ inputs.region }}-${{ github.run_attempt }}
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 90

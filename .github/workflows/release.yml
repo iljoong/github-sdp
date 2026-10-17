@@ -1,0 +1,99 @@
+name: Safe ACA release - Korea then Germany then Brazil
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: production = 3 x 1h per region; demo = educational synthetic short bake
+        type: choice
+        options: [production, demo]
+        default: production
+permissions:
+  contents: read
+concurrency:
+  group: safe-aca-production
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment: build
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      ACR_NAME: ${{ vars.ACR_NAME }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Reject reruns and validate locally
+        env:
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          test "$RUN_ATTEMPT" = "1" || { echo "Deploy reruns forbidden; restore or start a new release"; exit 1; }
+          python -m unittest discover -s tests -v
+          python -m compileall -q app scripts tests
+      - uses: azure/login@8c334a195cbb38e46038007b304988d888bf676a
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Build and push once; record immutable digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$ACR_NAME" =~ ^[a-z0-9]{5,50}$ ]] || exit 1
+          server=$(az acr show -n "$ACR_NAME" --query loginServer -o tsv)
+          az acr login -n "$ACR_NAME"
+          tag="safe-demo:run-${GITHUB_RUN_ID}"
+          docker build --platform linux/amd64 -t "$server/$tag" app
+          docker push "$server/$tag"
+          digest=$(az acr repository show -n "$ACR_NAME" --image "$tag" --query digest -o tsv)
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          export IMAGE="$server/safe-demo@$digest"
+          python -c 'import os; from scripts.common import save; save("release.json", {"image":os.environ["IMAGE"],"run_id":os.environ["GITHUB_RUN_ID"],"repository":os.environ["GITHUB_REPOSITORY"],"commit":os.environ["GITHUB_SHA"]})'
+          docker logout "$server"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ github.run_id }}
+          path: release.json
+          if-no-files-found: error
+          retention-days: 90
+  korea:
+    needs: build
+    uses: ./.github/workflows/region.yml
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    with:
+      region: kr
+      environment: prod-kr
+      profile: ${{ inputs.profile }}
+  germany:
+    needs: korea
+    if: needs.korea.result == 'success'
+    uses: ./.github/workflows/region.yml
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    with:
+      region: de
+      environment: prod-de
+      profile: ${{ inputs.profile }}
+  brazil:
+    needs: germany
+    if: needs.germany.result == 'success'
+    uses: ./.github/workflows/region.yml
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    with:
+      region: br
+      environment: prod-br
+      profile: ${{ inputs.profile }}

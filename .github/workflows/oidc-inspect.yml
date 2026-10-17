@@ -1,0 +1,31 @@
+name: Inspect actual protected environment OIDC claims - no Azure access
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  inspect:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [build, prod-kr, prod-de, prod-br, prod-rollback-kr, prod-rollback-de, prod-rollback-br]
+    environment: ${{ matrix.environment }}
+    env:
+      INSPECT_ENVIRONMENT: ${{ matrix.environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Print and persist only allowlisted metadata (never bearer JWT)
+        run: python scripts/inspect_oidc.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oidc-claims-${{ github.run_id }}-${{ matrix.environment }}
+          path: state/claims-${{ matrix.environment }}.json
+          if-no-files-found: error
+          retention-days: 7

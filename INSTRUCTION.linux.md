@@ -4,6 +4,9 @@
 배포 동작, health gate 기준, 복구 제약 및 운영상 주의 사항은
 [PowerShell 가이드](INSTRUCTION.md)와 동일합니다.
 
+배포 순서는 Korea Central (`kr`, `koreacentral`) → Southeast Asia
+(`sea`, `southeastasia`) → West US (`usw`, `westus`)입니다.
+
 ## 1. 사전 요구 사항
 
 - Bash 4+
@@ -166,6 +169,12 @@ helper는 검사한 claim `sub`를 사용하고, client secret 없이 federated 
 ### 지역별 배포 및 rollback identity 구성
 
 다음 반복문은 지역마다 배포 및 rollback용 identity를 별도로 구성합니다.
+
+`state/bootstrap-outputs.json`의 지역 키가 `kr`, `sea`, `usw`인지 확인하세요.
+기존 `de`/`br` 키나 claims 파일의 이름만 바꾸지 마세요. 새 지역의 실제 리소스와
+새 environment에서 검사한 claims 파일이 필요합니다.
+이미 `prod-kr` 및 `prod-rollback-kr` 구성이 성공했다면 아래 반복문의 첫 줄을
+`for region in sea usw; do`로 바꾸어 나머지 지역만 실행하세요.
 
 ```bash
 for region in kr sea usw; do

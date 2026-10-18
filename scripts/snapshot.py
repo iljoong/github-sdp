@@ -19,7 +19,9 @@ def main():
     value = app()
     require(props(value)["configuration"]["activeRevisionsMode"] == "Multiple", "Multiple mode required")
     ingress = props(value)["configuration"]["ingress"]
-    require(ingress.get("external") and ingress.get("transport") in {"auto", "http", "http2"},
+    transport = ingress.get("transport")
+    require(ingress.get("external") and isinstance(transport, str)
+            and transport.lower() in {"auto", "http", "http2"},
             "Example expects public HTTP ingress")
     weights = traffic(value)
     stable = [name for name, weight in weights.items() if weight == 100]

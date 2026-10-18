@@ -171,6 +171,11 @@ prod-kr, prod-sea, prod-usw
 prod-rollback-kr, prod-rollback-sea, prod-rollback-usw
 ```
 
+지역 코드는 Korea Central (`kr`, `koreacentral`), Southeast Asia
+(`sea`, `southeastasia`), West US (`usw`, `westus`)입니다.
+이전 `de`/`br` 환경 대신 새 환경을 생성하고 OIDC claim 검사를 다시 실행하세요.
+기존 리소스, bootstrap 출력 및 claims 파일의 이름만 바꾸면 안 됩니다.
+
 권장 설정:
 
 - 모든 환경의 deployment branch를 `main`으로 제한

@@ -19,6 +19,7 @@ import common
 import inspect_oidc
 import metrics
 import rollout
+import snapshot as snapshot_script
 
 spec = importlib.util.spec_from_file_location("demo_server", ROOT / "app" / "server.py")
 server = importlib.util.module_from_spec(spec)
@@ -51,6 +52,49 @@ def rows():
 
 
 class SafetyTests(unittest.TestCase):
+    def test_snapshot_validates_public_http_ingress_case_insensitively(self):
+        environment = {"GITHUB_RUN_ATTEMPT": "1", "REGION": "kr",
+                       "GITHUB_REPOSITORY": "owner/repo", "GITHUB_RUN_ID": "123",
+                       "GITHUB_SHA": "commit", "CONTAINER_APP": "myapp",
+                       "RESOURCE_GROUP": "group"}
+        release = {"repository": "owner/repo", "run_id": "123", "commit": "commit",
+                   "image": snapshot()["image"]}
+        baseline = {"properties": {"active": True, "healthState": "Healthy",
+                                  "provisioningState": "Provisioned", "runningState": "Running",
+                                  "template": template()}}
+        cases = [(True, transport, True) for transport in
+                 ("auto", "Auto", "AUTO", "http", "Http", "HTTP", "http2", "Http2", "HTTP2")]
+        cases += [(True, transport, False) for transport in
+                  ("tcp", "Tcp", "", None, 123)]
+        cases += [(False, "Auto", False), (None, "Auto", False)]
+        for external, transport, accepted in cases:
+            with self.subTest(external=external, transport=transport):
+                ingress = {"external": external, "traffic": [
+                    {"revisionName": "myapp--old", "weight": 100}]}
+                if transport is not None:
+                    ingress["transport"] = transport
+                value = {"properties": {"configuration": {
+                    "activeRevisionsMode": "Multiple", "ingress": ingress},
+                    "template": template()}}
+                with patch.dict(os.environ, environment), \
+                     patch.object(snapshot_script.Path, "exists", return_value=False), \
+                     patch.object(snapshot_script, "load", return_value=release), \
+                     patch.object(snapshot_script, "app", return_value=value), \
+                     patch.object(snapshot_script, "revision", return_value=baseline), \
+                     patch.object(snapshot_script, "az", return_value=[]), \
+                     patch.object(snapshot_script, "app_id", return_value=snapshot()["app_id"]), \
+                     patch.object(snapshot_script, "save") as save, \
+                     patch("builtins.print"):
+                    if accepted:
+                        snapshot_script.main()
+                        save.assert_called_once()
+                        self.assertEqual(save.call_args.args[1]["traffic"], {"myapp--old": 100})
+                        self.assertEqual(ingress["transport"], transport)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "public HTTP ingress"):
+                            snapshot_script.main()
+                        save.assert_not_called()
+
     def test_oidc_inspection_preserves_legacy_and_immutable_subjects(self):
         for subject in ("repo:owner/repo:environment:prod-kr",
                         "repo:owner@123/repo@456:environment:prod-kr"):

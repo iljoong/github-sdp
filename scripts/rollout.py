@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 
+import demo_load
 from common import (az, candidate_owned, cli_app, equal_traffic, guarded_state, iso, load,
                     props, ready, require, revision, save, set_traffic, utcnow, verify_context)
 from metrics import (PROFILES, TELEMETRY_RETRY_SECONDS, TELEMETRY_RETRY_TIMEOUT,
@@ -30,59 +31,38 @@ def request(fqdn, path, source, run, expected_revision=None):
         return body
 
 
-def generate_demo_traffic(stop, fqdn, run, stats):
-    pending = set()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
-        next_request = time.monotonic()
-        try:
-            while not stop.is_set():
-                for future in list(pending):
-                    if future.done():
-                        pending.remove(future)
-                        future.result()
-                        stats["completed"] += 1
-                delay = next_request - time.monotonic()
-                if delay > 0:
-                    stop.wait(delay)
-                    continue
-                require(len(pending) < 32, "Demo load generator saturated: 32 requests outstanding")
-                pending.add(pool.submit(request, fqdn, "/work", "demo", run))
-                stats["submitted"] += 1
-                # No unbounded catch-up bursts after scheduler delays.
-                next_request = max(next_request + 0.1, time.monotonic())
-        finally:
-            for future in pending:
-                future.result()
-                stats["completed"] += 1
-
-
 @contextmanager
 def demo_traffic(profile, snapshot, fqdn, weight):
     if profile != "demo":
         yield lambda: None
         return
     stop = threading.Event()
-    stats = {"target_rps": 10, "submitted": 0, "completed": 0,
-             "run_id": snapshot["run_id"], "weight": weight, "started_at": iso(utcnow())}
-    started = time.monotonic()
+    stats = {"run_id": snapshot["run_id"], "weight": weight,
+             "region": os.environ["REGION"], "profile": profile}
+    generator = demo_load.Generator(stop, fqdn, snapshot["run_id"], stats)
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as scheduler:
-        task = scheduler.submit(generate_demo_traffic, stop, fqdn, snapshot["run_id"], stats)
+        task = scheduler.submit(generator.run)
         try:
-            yield lambda: task.result() if task.done() else None
+            yield generator.check
+        except BaseException as error:
+            if error is not generator.first_error():
+                generator.failure(error, "controller")
         finally:
             stop.set()
             try:
                 task.result()
-                stats["status"] = "completed"
-            except Exception as error:
-                stats.update({"status": "failed", "error": str(error)})
-                raise
-            finally:
-                elapsed = time.monotonic() - started
-                stats.update({"finished_at": iso(utcnow()), "elapsed_seconds": elapsed,
-                              "achieved_rps": stats["completed"] / elapsed if elapsed > 0 else 0})
+            except BaseException as error:
+                generator.failure(error, "scheduler")
+            generator.finish_evidence()
+            try:
                 save(Path("evidence") / os.environ["REGION"] / f"demo-load-{weight}.json", stats)
+            except Exception as error:
+                generator.failure(error, "evidence")
+                generator.finish_evidence()
+                print(f"Cannot persist demo load evidence: {error}", flush=True)
+            finally:
                 print(json.dumps({"demo_load": stats}), flush=True)
+        generator.check()
 
 
 def wait_ready(snapshot):
@@ -106,6 +86,8 @@ def baseline_preflight(snapshot, profile):
     record = {"started_at": iso(utcnow()), "profile": profile, "run_id": snapshot["run_id"],
               "stable": snapshot["stable"], "status": "checking"}
     try:
+        if profile == "demo":
+            demo_load.verify_transport()
         guarded_state(snapshot, snapshot["traffic"])
         fqdn = props(revision(snapshot["stable"]))["fqdn"]
         request(fqdn, "/healthz", "probe", snapshot["run_id"], snapshot["stable"])

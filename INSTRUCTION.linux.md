@@ -205,9 +205,28 @@ helper가 중단합니다. 누락된 role assignment나 variable을 복구할 �
 
 Demo 부하는 shared app endpoint에 초당 10건을 목표로 독립적으로 전송하므로
 Azure 조회 및 telemetry 대기 중에도 계속 실행됩니다. worker 최대 16개와
-실행/대기 요청 합계 최대 32개로 제한하며 요청 실패/큐 포화는 명시적으로 실패합니다.
-단계 종료 시 부하를 중단하고 진행 중 요청을 정리합니다. 목표/실제 RPS,
-제출/완료 수 및 오류는 `evidence/<region>/demo-load-<weight>.json`에 기록합니다.
+실행/대기 요청 합계 최대 32개로 제한합니다. 포화 시 제출을 멈추고 여유가 생기면
+10 RPS pacing으로 재개하며 밀린 요청을 burst로 보내지 않습니다. 연속 포화가 30초에
+도달하거나 요청이 실패하면 명시적으로 실패합니다. 회복 시 연속 타이머만 초기화하며
+누적 포화 시간과 반복 횟수는 유지합니다.
+
+Demo에는 **curl >= 8.4.0**이 필요하며 mutation 전 baseline preflight에서 확인합니다.
+curl 프로세스의 DNS/connect/TLS/body 전체 제한은 10초, 별도 process watchdog은
+12초이며 kill 후 회수에는 추가 최대 1초를 허용합니다. 응답은 64 KiB로 제한합니다.
+기존 readiness/control probe는 변경하지 않습니다. 정상 종료, 오류, SIGINT/SIGTERM
+시 새 제출을 멈추고 시작 전 요청을 취소하며 실행 중 요청은 최대 20초 drain합니다.
+미해결 요청을 명시적으로 기록하며 thread가 강제 종료되었다고 주장하지 않습니다.
+SIGKILL/host loss에는 보호된 수동 restore workflow가 필요합니다.
+
+`evidence/<region>/demo-load-<weight>.json` schema version 2는 region/profile/구현
+commit, generator 상태, 제출/성공/실패/시작 전 취소/미해결 수, queue delay와
+end-to-end duration의 고정 크기 histogram, 포화 시간, shutdown 결과를 포함합니다.
+`completed`는 기존처럼 성공 수이며 `achieved_rps`는 drain을 포함한 전체 경과 시간의
+성공 RPS입니다. 완결된 60초 interval 및 마지막 부분 interval의 처리율을 구분하고
+목표/실제 RPS와 queue pressure를 콘솔에도 출력합니다. 최초 controller/load 오류는
+primary, 이후 요청/drain/evidence 오류는 secondary로 남깁니다. 파일 저장 실패도
+콘솔에 표시하며 승격을 허용하지 않습니다. 토큰/credential header/응답 본문은 기록하지
+않습니다.
 표본/SLO 기준은 유지하며 production에는 합성 부하를 생성하지 않습니다.
 
 배포 중 gate는 기본 120초 로그 수집 대기 후 telemetry 누락/표본 부족에 한해

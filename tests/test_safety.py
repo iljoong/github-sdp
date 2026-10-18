@@ -234,18 +234,27 @@ class SafetyTests(unittest.TestCase):
 
         with patch.object(rollout.time, "monotonic", side_effect=lambda: elapsed[0]), \
              patch.object(rollout.concurrent.futures, "ThreadPoolExecutor") as executor, \
-             patch.object(rollout, "request") as request:
-            executor.return_value.__enter__.return_value.submit.side_effect = submit
-            rollout.generate_demo_traffic(stop, "shared.example", "123", stats)
+             patch.object(rollout.demo_load, "request") as request, patch("builtins.print"):
+            executor.return_value.submit.side_effect = submit
+            generator = rollout.demo_load.Generator(stop, "shared.example", "123", stats)
+            generator.run()
+            generator.check()
             self.assertGreaterEqual(stats["completed"], 599)
             self.assertLessEqual(stats["completed"], 601)
             self.assertEqual(stats["submitted"], stats["completed"])
-            self.assertTrue(all(call.args == ("shared.example", "/work", "demo", "123")
+            complete = [interval for interval in stats["intervals"] if interval["complete"]]
+            self.assertEqual(len(complete), 1)
+            self.assertGreaterEqual(complete[0]["submitted"], 599)
+            self.assertLessEqual(complete[0]["submitted"], 601)
+            self.assertEqual(stats["queue_delay"]["count"], stats["submitted"])
+            self.assertEqual(stats["request_duration"]["count"], stats["submitted"])
+            self.assertFalse(generator.pending)
+            self.assertTrue(all(call.args == ("shared.example", "123")
                                 for call in request.call_args_list))
 
     def test_demo_load_continues_during_blocking_monitoring_and_stops_on_exit(self):
         with patch.dict(os.environ, {"REGION": "kr"}), \
-             patch.object(rollout, "request", side_effect=lambda *args: time.sleep(0.15)) as request, \
+             patch.object(rollout.demo_load, "request", side_effect=lambda *args: time.sleep(0.15)) as request, \
              patch.object(rollout, "save") as save, patch("builtins.print"):
             with rollout.demo_traffic("demo", snapshot(), "shared.example", 10) as check:
                 time.sleep(1.3)  # Simulate a blocking Azure query on the monitoring thread.
@@ -260,6 +269,8 @@ class SafetyTests(unittest.TestCase):
             self.assertGreater(record["achieved_rps"], 7)
             self.assertEqual(record["target_rps"], 10)
             self.assertEqual(record["status"], "completed")
+            self.assertEqual(record["shutdown"]["outcome"], "drained")
+            self.assertFalse(any(t.name.startswith("demo-request") for t in threading.enumerate()))
 
     def test_demo_load_surfaces_request_errors_and_records_failure(self):
         attempted = threading.Event()
@@ -269,7 +280,7 @@ class SafetyTests(unittest.TestCase):
             raise RuntimeError("load request failed")
 
         with patch.dict(os.environ, {"REGION": "kr"}), \
-             patch.object(rollout, "request", side_effect=fail_request), \
+             patch.object(rollout.demo_load, "request", side_effect=fail_request), \
              patch.object(rollout, "save") as save, patch("builtins.print"):
             with self.assertRaisesRegex(RuntimeError, "load request failed"):
                 with rollout.demo_traffic("demo", snapshot(), "shared.example", 10):
@@ -280,7 +291,7 @@ class SafetyTests(unittest.TestCase):
     def test_demo_load_stops_and_drains_when_monitoring_fails(self):
         attempted = threading.Event()
         with patch.dict(os.environ, {"REGION": "kr"}), \
-             patch.object(rollout, "request", side_effect=lambda *args: attempted.set()) as request, \
+             patch.object(rollout.demo_load, "request", side_effect=lambda *args: attempted.set()) as request, \
              patch.object(rollout, "save") as save, patch("builtins.print"):
             with self.assertRaisesRegex(RuntimeError, "monitoring failed"):
                 with rollout.demo_traffic("demo", snapshot(), "shared.example", 10):
@@ -291,19 +302,29 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual(request.call_count, count)
             self.assertEqual(save.call_args.args[1]["submitted"], save.call_args.args[1]["completed"])
 
-    def test_demo_load_queue_is_bounded_and_saturation_fails(self):
+    def test_demo_load_queue_is_bounded_and_capacity_deadline_fails(self):
         elapsed = [0.0]
         stop = unittest.mock.Mock()
         stop.is_set.return_value = False
         stop.wait.side_effect = lambda delay: elapsed.__setitem__(0, elapsed[0] + delay)
         stats = {"submitted": 0, "completed": 0}
         with patch.object(rollout.time, "monotonic", side_effect=lambda: elapsed[0]), \
+             patch.object(rollout.time, "sleep", side_effect=stop.wait), \
              patch.object(rollout.concurrent.futures, "ThreadPoolExecutor") as executor:
-            pool = executor.return_value.__enter__.return_value
-            pool.submit.side_effect = lambda *args: unittest.mock.Mock(done=lambda: False)
-            with self.assertRaisesRegex(RuntimeError, "saturated"):
-                rollout.generate_demo_traffic(stop, "shared.example", "123", stats)
+            pool = executor.return_value
+            def submit(*args):
+                future = concurrent.futures.Future()
+                future.set_running_or_notify_cancel()
+                return future
+            pool.submit.side_effect = submit
+            generator = rollout.demo_load.Generator(stop, "shared.example", "123", stats)
+            generator.run()
+            with self.assertRaises(rollout.demo_load.LoadCapacityError):
+                generator.check()
             self.assertEqual(pool.submit.call_count, 32)
+            self.assertAlmostEqual(stats["max_continuous_saturation_seconds"], 30)
+            self.assertEqual(stats["unresolved"], 32)
+            self.assertEqual(stats["shutdown"]["outcome"], "deadline_exceeded")
 
     def test_production_never_starts_synthetic_load(self):
         with patch.object(rollout.concurrent.futures, "ThreadPoolExecutor") as executor:

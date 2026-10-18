@@ -285,11 +285,28 @@ workspace의 customer GUID입니다.
 합성 부하는 모니터링 루프와 독립된 scheduler에서 shared app endpoint의 `/work`로
 초당 10건을 목표로 전송합니다. Azure CLI 조회, control probe 및 telemetry 재시도
 중에도 계속 실행되며 실제 90/10 등의 라우팅을 통과합니다. HTTP worker는 최대
-16개, 실행/대기 요청은 합계 최대 32개로 제한합니다. 요청 오류나 큐 포화는
-명시적 실패로 처리하고, 단계 종료/오류 시 부하를 중단한 뒤 진행 중 요청을 정리합니다.
+16개, 실행/대기 요청은 합계 최대 32개로 제한합니다. 일시적인 큐 포화에는 제출을
+중지하고 여유가 생기면 초당 10건의 pacing으로 재개하며 밀린 요청을 몰아서 보내지
+않습니다. 연속 포화가 30초에 도달하거나 요청이 실패하면 명시적 실패로 처리합니다.
+Production 경로에는 이 scheduler나 demo evidence를 생성하지 않습니다.
 
-단계별 `evidence/<region>/demo-load-<weight>.json`에 목표 RPS, 제출/완료 요청 수,
-실행 시간, 실제 완료 RPS 및 부하 생성 오류를 기록하고 콘솔에도 출력합니다.
+Demo transport에는 **curl 8.4.0 이상**이 필요하며 mutation 전 baseline preflight에서
+버전을 확인합니다. 별도 curl 프로세스의 전체 DNS/connect/TLS/body 작업 제한은 10초,
+프로세스 watchdog은 12초이며 kill 후 회수에는 추가 최대 1초를 허용합니다.
+응답 크기는 64 KiB로 제한합니다. 기존 readiness/control probe transport는 변경하지 않습니다.
+정상 종료, 오류, SIGINT/SIGTERM 시 제출을 중단하고 시작 전 요청을 취소하며 실행 중
+요청을 최대 20초 drain합니다. 해결되지 않은 요청은 evidence에 남기며 thread 종료를
+주장하지 않습니다. SIGKILL/host loss는 보호된 수동 restore workflow를 사용하세요.
+
+단계별 `evidence/<region>/demo-load-<weight>.json`의 schema version 2에는 region,
+profile, 구현 commit, generator 상태, 제출/성공/실패/시작 전 취소/미해결 수,
+queue delay 및 end-to-end duration의 고정 크기 histogram, 포화 횟수/시간과 shutdown
+결과를 기록합니다. `completed`는 기존과 같이 **성공한 요청 수**이며 `achieved_rps`는
+drain을 포함한 전체 경과 시간의 성공 RPS입니다. 60초 단위 완결 interval과 마지막
+부분 interval을 구분하고 target/actual RPS, queue pressure를 콘솔에도 출력합니다.
+최초 controller/load 오류를 primary로 보존하고 후속 요청/drain/evidence 오류는
+secondary로 기록합니다. 파일 저장 오류는 콘솔에 표시하며 승격을 허용하지 않습니다.
+토큰, credential header, 응답 본문은 evidence에 기록하지 않습니다.
 실제 속도와 candidate 배분은 네트워크/라우팅에 따라 달라지므로 표본 기준을
 보장하거나 완화하지 않습니다. production 프로필에서는 합성 부하를 생성하지 않습니다.
 

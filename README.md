@@ -69,6 +69,11 @@ docker run --rm -p 8080:8080 safe-demo:local
 기본 PowerShell 7 가이드는 [INSTRUCTION.md](INSTRUCTION.md),
 Linux Bash 가이드는 [INSTRUCTION.linux.md](INSTRUCTION.linux.md)를 참조하세요.
 
+SDP 개선 단계별 구현 명세와 기존 구현/검증 상태는
+[docs/spec/](docs/spec/README.md)를 참조하세요. Phase 1 demo load reliability는
+승인 후 구현되었으며 비운영 환경의 운영 검증은 아직 실행하지 않았습니다.
+Phase 2/3은 승인 대기 초안이며 requirement/evidence ledger로 상태를 구분합니다.
+
 ## 주요 구성
 
 | 경로 | 설명 |

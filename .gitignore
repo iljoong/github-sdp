@@ -6,3 +6,5 @@ release.json
 restore-input/
 infra/*.json
 !infra/*parameters.json
+
+_*

@@ -3,7 +3,8 @@
 ## Status and baseline
 
 - Created: 2026-10-18.
-- Specification status: **Phase 1 approved and implemented; Phases 2/3 DRAFT**.
+- Specification status: **Phase 1 approved and implemented; Phases 2/3 and
+  expedited patch/revision cleanup DRAFT**.
 - Inspected implementation: `f5f22a75d50daf94296062720c610be61264d44b`.
 - Phase 1 implementation and its 30-second saturation deadline, 20-second drain
   budget, and curl transport were approved on 2026-10-18. No deployment or
@@ -17,6 +18,22 @@
 | 1 | [Demo load reliability](phase-1-demo-load-reliability.md) | Implemented; automated validation recorded, operational acceptance not run | Approved 2026-10-18 |
 | 2 | [Gate orchestration and recovery](phase-2-gate-orchestration.md) | Draft; bounded telemetry retry exists, independent monitoring does not | Phase 1 interfaces verified; approval of Phase 2 |
 | 3 | [Production quality and ownership](phase-3-production-hardening.md) | Draft; existing production guards are not production certification | Phase 2 verified; approved service-specific policy |
+
+## Additional operational specifications
+
+The following drafts were requested on 2026-10-18. Documentation approval does
+not authorize implementation, deployment, or cleanup. They use `4cad565` as their
+inspected baseline; the historical phase baseline and validation above remain
+unchanged.
+
+| Specification | Current state | Prerequisite |
+| --- | --- | --- |
+| [Expedited patch deployment](expedited-patch.md) | Draft; explicit 0% to 100% mode without bake windows, not implemented | Approved eligibility, input, verification, and authorization policy |
+| [Guarded revision cleanup](revision-cleanup.md) | Draft; separate manual dry-run-first deactivation workflow, not implemented | Approved retention, durable protection inventory, and mutation policy |
+
+These specifications are not new numbered phases and do not implicitly approve
+Phases 2/3. Each records existing evidence, proposed requirements, decisions, and
+acceptance criteria using the shared ledger vocabulary.
 
 ## Read before implementing
 
@@ -81,6 +98,14 @@ All phases must preserve:
 - No deploy reruns, blind overwrite of drift, or automatic deletion of revisions.
 - Failed deployment remains failed even when rollback succeeds.
 - No inference that reverting traffic reverts databases or external side effects.
+
+The additional drafts define narrow proposed extensions, not changes to these
+implemented defaults. Patch mode would explicitly replace staged weights and
+windowed production gates with direct cutover and smoke verification, recording
+that sustained SLOs were not evaluated. Cleanup would deactivate only eligible
+unprotected revisions while preserving the active current/previous-LKG pair;
+it would not delete revisions or run unconditionally after release. All other
+applicable safety and ownership protections remain required.
 
 Primary implementation surfaces:
 [rollout](../../scripts/rollout.py),

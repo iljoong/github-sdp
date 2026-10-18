@@ -164,9 +164,18 @@ def verify_context(snapshot):
 
 def normalized_template(template):
     value = json.loads(json.dumps(template))
+    scale = value.get("scale", {})
+    for key in ("cooldownPeriod", "pollingInterval"):
+        if key in scale and scale[key] is None:
+            del scale[key]
     for container in value.get("containers", []):
         if "env" in container:
             container["env"] = sorted(container["env"], key=lambda v: v["name"])
+        resources = container.get("resources", {})
+        # Azure materializes 1Gi ephemeral storage for this example's Consumption size.
+        if (resources.get("cpu") == 0.25 and resources.get("memory") == "0.5Gi"
+                and resources.get("ephemeralStorage") == "1Gi"):
+            del resources["ephemeralStorage"]
     return value
 
 
@@ -201,6 +210,10 @@ def guarded_state(snapshot, expected_weights=None):
 
 def candidate_owned(snapshot):
     value = revision(snapshot["candidate"])
-    require(normalized_template(props(value)["template"]) == expected_candidate(snapshot),
+    template = normalized_template(props(value)["template"])
+    if template.get("revisionSuffix") is None:
+        require(value.get("name") == snapshot["candidate"], "Candidate revision name mismatch")
+        template["revisionSuffix"] = f'r{snapshot["run_id"]}'
+    require(template == expected_candidate(snapshot),
             "Candidate template drift; do not mutate")
     return value

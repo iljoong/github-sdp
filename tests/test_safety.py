@@ -218,6 +218,79 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(result["source"], "organic")
         self.assertIn("stable_live_controls", result)
 
+    def test_template_normalization_preserves_nondefault_resource_and_scale_drift(self):
+        original = template()
+        original["containers"][0]["resources"] = {"cpu": 0.25, "memory": "0.5Gi"}
+        original["scale"].update({"cooldownPeriod": None, "pollingInterval": None})
+        returned = json.loads(json.dumps(original))
+        returned["containers"][0]["resources"]["ephemeralStorage"] = "1Gi"
+        del returned["scale"]["cooldownPeriod"]
+        del returned["scale"]["pollingInterval"]
+        self.assertEqual(common.normalized_template(original), common.normalized_template(returned))
+        self.assertNotIn("ephemeralStorage", original["containers"][0]["resources"])
+        self.assertIn("cooldownPeriod", original["scale"])
+        self.assertEqual(returned["containers"][0]["resources"]["ephemeralStorage"], "1Gi")
+        for section, key, value in [
+            ("resources", "ephemeralStorage", "2Gi"),
+            ("resources", "cpu", 0.5),
+            ("resources", "memory", "1Gi"),
+            ("scale", "cooldownPeriod", 300),
+            ("scale", "pollingInterval", 30),
+            ("scale", "minReplicas", 2),
+        ]:
+            changed = json.loads(json.dumps(returned))
+            target = changed["containers"][0]["resources"] if section == "resources" else changed["scale"]
+            target[key] = value
+            with self.subTest(section=section, key=key):
+                self.assertNotEqual(common.normalized_template(original), common.normalized_template(changed))
+
+    def test_guard_and_candidate_ownership_accept_only_known_azure_defaults(self):
+        s = snapshot()
+        s["stable_template"]["containers"][0]["resources"] = {"cpu": 0.25, "memory": "0.5Gi"}
+        s["stable_template"]["scale"].update({"cooldownPeriod": None, "pollingInterval": None})
+        s["stable_template_hash"] = common.digest(s["stable_template"])
+        candidate = common.expected_candidate(s)
+        candidate["containers"][0]["resources"]["ephemeralStorage"] = "1Gi"
+        candidate["scale"].pop("cooldownPeriod", None)
+        candidate["scale"].pop("pollingInterval", None)
+        current = {"properties": {"configuration": {"ingress": {"traffic": [
+            {"revisionName": s["stable"], "weight": 100}]}}, "template": candidate}}
+        environment = {"AZURE_SUBSCRIPTION_ID": "sub", "RESOURCE_GROUP": "group",
+                       "CONTAINER_APP": "myapp", "REGION": "kr", "GITHUB_REPOSITORY": "owner/repo"}
+        def revision(name):
+            return {"name": name,
+                    "properties": {"template": s["stable_template"] if name == s["stable"] else candidate}}
+
+        with patch.dict(os.environ, environment), \
+             patch.object(common, "app", return_value=current), \
+             patch.object(common, "revision", side_effect=revision), \
+             patch.object(common, "ready", return_value=True), \
+             patch.object(common, "invariant", return_value="invariant"):
+            common.guarded_state(s, s["traffic"])
+            common.candidate_owned(s)
+            candidate["revisionSuffix"] = None
+            common.candidate_owned(s)
+            candidate["revisionSuffix"] = "another"
+            with self.assertRaisesRegex(RuntimeError, "Candidate template drift"):
+                common.candidate_owned(s)
+            candidate["revisionSuffix"] = "r123"
+            candidate["containers"][0]["resources"]["ephemeralStorage"] = "2Gi"
+            with self.assertRaisesRegex(RuntimeError, "App template"):
+                common.guarded_state(s)
+            with self.assertRaisesRegex(RuntimeError, "Candidate template drift"):
+                common.candidate_owned(s)
+
+    def test_candidate_null_suffix_requires_exact_revision_name(self):
+        s = snapshot()
+        candidate = common.expected_candidate(s)
+        candidate["revisionSuffix"] = None
+        for name in (None, "myapp--another"):
+            with self.subTest(name=name), \
+                 patch.object(common, "revision", return_value={
+                     "name": name, "properties": {"template": candidate}}):
+                with self.assertRaisesRegex(RuntimeError, "Candidate revision name mismatch"):
+                    common.candidate_owned(s)
+
     def test_production_rejects_synthetic_only(self):
         with self.assertRaisesRegex(RuntimeError, "Missing"):
             metrics.gate([r for r in rows() if r["Source"] != "organic"], snapshot(), "production", 10)

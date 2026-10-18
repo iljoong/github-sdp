@@ -36,6 +36,9 @@ West US → Southeast Asia → 한국 순서로 시도합니다.
 Template 비교는 Azure 응답의 일부 기본값 표현 차이만 정규화합니다:
 scale의 null/생략된 `cooldownPeriod` 및 `pollingInterval`, 이 예제의
 0.25 CPU/0.5Gi 컨테이너에서 자동 반환되는 `ephemeralStorage: 1Gi`입니다.
+Azure가 health probe 배열 순서를 바꿔 반환할 수 있으므로 비교 시 `type`으로
+정렬합니다. probe의 필드 값, 누락 및 중복은 그대로 비교하여 drift를 거부합니다.
+저장된 snapshot과 공유 probe 정책의 순서는 변경하지 않습니다.
 Candidate revision의 `revisionSuffix`가 null/생략된 경우에는 반환된 revision
 이름이 해당 run의 candidate와 정확히 일치해야 합니다. 그 밖의 template 변경은
 계속 drift로 처리하며, 저장된 stable template hash 검증은 유지합니다.

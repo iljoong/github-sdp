@@ -229,6 +229,9 @@ template-only PATCH를 보내므로 traffic/app-scoped 설정과 stable/LKG revi
 수정하지 않습니다. 후보는 0%에서 readiness/business 확인 후 기존 10/50/100% gate로
 승격합니다. 예전 snapshot에 정책 필드가 없으면 원래 probe를 유지하여 과거 복구
 artifact와의 호환성을 보존합니다.
+Azure가 probe 배열 순서를 바꿔 반환할 수 있으므로 template 비교 시 `type`으로
+정렬합니다. 필드 값 변경, 누락 및 중복은 계속 drift로 거부하며 저장된 snapshot과
+공유 probe 정책은 수정하지 않습니다.
 
 **라이브 앱에 bootstrap Bicep을 다시 배포하지 마세요.** 기존 stable의 probe 설정은
 바뀌지 않으므로 그 revision에는 2초 timeout 로그가 계속 나타날 수 있습니다.

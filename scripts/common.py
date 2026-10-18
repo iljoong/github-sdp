@@ -171,6 +171,9 @@ def normalized_template(template):
     for container in value.get("containers", []):
         if "env" in container:
             container["env"] = sorted(container["env"], key=lambda v: v["name"])
+        # Azure returns probes in type order, independent of the submitted order.
+        if isinstance(container.get("probes"), list):
+            container["probes"] = sorted(container["probes"], key=lambda p: p.get("type", ""))
         resources = container.get("resources", {})
         # Azure materializes 1Gi ephemeral storage for this example's Consumption size.
         if (resources.get("cpu") == 0.25 and resources.get("memory") == "0.5Gi"

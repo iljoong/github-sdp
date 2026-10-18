@@ -245,13 +245,15 @@ class SafetyTests(unittest.TestCase):
         s["stable_template"]["containers"][0]["probes"] = old_probes
         before = json.loads(json.dumps(s))
         candidate = common.expected_candidate(s)
-        self.assertEqual(candidate["containers"][0]["probes"], s["candidate_probes"])
+        self.assertEqual(candidate["containers"][0]["probes"],
+                         sorted(s["candidate_probes"], key=lambda p: p["type"]))
         self.assertEqual(s, before)
         candidate["containers"][0]["probes"][0]["timeoutSeconds"] = 9
         self.assertEqual(s, before)
         del s["candidate_probes"]
         legacy = common.expected_candidate(s)
-        self.assertEqual(legacy["containers"][0]["probes"], old_probes)
+        self.assertEqual(legacy["containers"][0]["probes"],
+                         sorted(old_probes, key=lambda p: p["type"]))
         self.assertEqual(legacy["containers"][0]["image"], s["image"])
 
     def test_candidate_probe_policy_is_frozen_and_drift_is_rejected(self):
@@ -270,7 +272,7 @@ class SafetyTests(unittest.TestCase):
         changed[0]["timeoutSeconds"] = 8
         with patch.object(common, "load", return_value=changed) as read_policy:
             self.assertEqual(common.expected_candidate(s)["containers"][0]["probes"],
-                             s["candidate_probes"])
+                             sorted(s["candidate_probes"], key=lambda p: p["type"]))
             read_policy.assert_not_called()
 
     def test_snapshot_freezes_candidate_probes_without_modifying_stable(self):
@@ -563,6 +565,45 @@ class SafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Candidate template drift"):
                 common.candidate_owned(s)
 
+    def test_probe_reordering_is_accepted_but_probe_drift_is_rejected(self):
+        s = snapshot()
+        candidate = common.expected_candidate(s)
+        candidate["containers"][0]["probes"].sort(key=lambda p: p["type"])
+        current = {"properties": {"template": candidate}}
+        before = json.loads(json.dumps(s))
+        with patch.object(common, "verify_context"), \
+             patch.object(common, "app", return_value=current), \
+             patch.object(common, "invariant", return_value=s["invariant"]), \
+             patch.object(common, "traffic", return_value=s["traffic"]), \
+             patch.object(common, "ready", return_value=True), \
+             patch.object(common, "revision", side_effect=lambda name: {
+                 "name": name, "properties": {"template": (
+                     s["stable_template"] if name == s["stable"] else candidate)}}):
+            common.guarded_state(s, s["traffic"])
+            common.candidate_owned(s)
+            self.assertEqual(s, before)
+            self.assertEqual([p["type"] for p in candidate["containers"][0]["probes"]],
+                             ["Liveness", "Readiness", "Startup"])
+            for change in ("timeout", "path", "type", "missing", "duplicate"):
+                with self.subTest(change=change):
+                    probes = candidate["containers"][0]["probes"]
+                    original = json.loads(json.dumps(probes))
+                    if change == "timeout":
+                        probes[0]["timeoutSeconds"] = 2
+                    elif change == "path":
+                        probes[0]["httpGet"]["path"] = "/work"
+                    elif change == "type":
+                        probes[0]["type"] = "Startup"
+                    elif change == "missing":
+                        probes.pop()
+                    else:
+                        probes.append(json.loads(json.dumps(probes[0])))
+                    with self.assertRaisesRegex(RuntimeError, "App template"):
+                        common.guarded_state(s, s["traffic"])
+                    with self.assertRaisesRegex(RuntimeError, "Candidate template drift"):
+                        common.candidate_owned(s)
+                    candidate["containers"][0]["probes"] = original
+
     def test_candidate_null_suffix_requires_exact_revision_name(self):
         s = snapshot()
         candidate = common.expected_candidate(s)
@@ -702,7 +743,7 @@ class SafetyTests(unittest.TestCase):
                         if Path(call.args[0]).name == "candidate.json"]
             self.assertEqual(payloads, [{"properties": {"template": common.expected_candidate(snapshot())}}])
             self.assertEqual(payloads[0]["properties"]["template"]["containers"][0]["probes"],
-                             snapshot()["candidate_probes"])
+                             sorted(snapshot()["candidate_probes"], key=lambda p: p["type"]))
             self.assertNotIn("latest", copy_command)
 
     def test_existing_candidate_is_not_blindly_replayed(self):

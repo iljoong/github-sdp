@@ -10,7 +10,8 @@ from pathlib import Path
 
 from common import (az, candidate_owned, cli_app, equal_traffic, guarded_state, iso, load,
                     props, ready, require, revision, save, set_traffic, utcnow, verify_context)
-from metrics import PROFILES, gate, metric, query
+from metrics import (PROFILES, TELEMETRY_RETRY_SECONDS, TELEMETRY_RETRY_TIMEOUT,
+                     IncompleteTelemetry, gate, metric, query)
 
 
 def request(fqdn, path, source, run, expected_revision=None):
@@ -80,6 +81,8 @@ def bake(snapshot, profile, weight, expected_weights, stable_reference):
     next_end = started + timedelta(seconds=settings["window"])
     finish = started + timedelta(seconds=settings["bake"])
     next_control = next_guard = 0.0
+    next_query = 0.0
+    attempts = []
     evidence = Path("evidence") / os.environ["REGION"]
     # Demo traffic is deliberately NOT used by the production gate.
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
@@ -102,19 +105,38 @@ def bake(snapshot, profile, weight, expected_weights, stable_reference):
                     for future in pending:
                         future.result()
                     pending.clear()
-            if utcnow() >= next_end + timedelta(seconds=settings["lag"]):
+            if (utcnow() >= next_end + timedelta(seconds=settings["lag"])
+                    and time.monotonic() >= next_query):
                 begin = next_end - timedelta(seconds=settings["window"])
                 rows, kql = query(snapshot, begin, next_end, workspace)
                 record = {"start": iso(begin), "end": iso(next_end), "rows": rows, "query": kql,
                           "profile": profile, "run_id": snapshot["run_id"]}
                 filename = evidence / f"gate-{weight}-{int(next_end.timestamp())}.json"
+                attempts.append({"queried_at": iso(utcnow()), "rows": rows})
+                record["attempts"] = list(attempts)
                 save(filename, record)
-                result = gate(rows, snapshot, profile, weight, stable_reference)
+                try:
+                    result = gate(rows, snapshot, profile, weight, stable_reference)
+                except IncompleteTelemetry as error:
+                    deadline = next_end + timedelta(seconds=settings["lag"] + TELEMETRY_RETRY_TIMEOUT)
+                    expired = utcnow() >= deadline
+                    record.update({"status": "failed" if expired else "waiting",
+                                   "error": str(error), "retry_deadline": iso(deadline)})
+                    save(filename, record)
+                    if expired:
+                        raise
+                    print(f"Waiting for telemetry for closed window ending {iso(next_end)}: {error}",
+                          flush=True)
+                    next_query = time.monotonic() + TELEMETRY_RETRY_SECONDS
+                    continue
+                record["status"] = "passed"
                 record["result"] = result
                 save(filename, record)
                 stable_reference = result["stable_reference"]
                 print(json.dumps({"window": iso(next_end), "gate": result}), flush=True)
                 next_end += timedelta(seconds=settings["window"])
+                next_query = 0.0
+                attempts = []
             time.sleep(0.1 if profile == "demo" else 1)
         for future in pending:
             future.result()

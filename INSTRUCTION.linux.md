@@ -203,6 +203,12 @@ helper가 중단합니다. 누락된 role assignment나 variable을 복구할 �
 
 ## 5. 릴리스 및 복구 workflow
 
+배포 중 gate는 기본 120초 로그 수집 대기 후 telemetry 누락/표본 부족에 한해
+같은 닫힌 window를 30초 간격으로 추가 최대 300초 재조회합니다.
+표본 기준은 그대로 유지하며 health/drift 검사를 계속합니다. 관측된 SLO 위반이나
+query 오류는 즉시 실패합니다. 재시도 기록은 gate evidence의 `attempts`에 남습니다.
+production의 배포 전 baseline preflight에는 이 재시도가 적용되지 않습니다.
+
 전체 배포 경로를 검증하려면 demo profile을 실행합니다.
 
 ```bash

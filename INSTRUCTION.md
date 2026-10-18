@@ -279,7 +279,8 @@ workspace의 customer GUID입니다.
 
 전체 파이프라인 연결을 빠르게 확인하는 교육용 프로필입니다. `/work`에 대략
 10 req/s의 합성 부하를 발생시키고 단계마다 180초 관찰과 120초 로그 수집 지연을
-기다립니다. 실제 사용자 SLI를 검증하지 않습니다.
+기다립니다. 실제 사용자 SLI를 검증하지 않습니다. 로그 표본이 늦게 도착하면
+아래의 제한된 telemetry 재시도 시간만큼 더 걸릴 수 있습니다.
 
 ```powershell
 gh workflow run release.yml --repo $repo --ref main -f profile=demo
@@ -317,8 +318,20 @@ window의 JSON business log를 조회하고, request ID/revision별 중복을 �
 | 후보 p95 | stable p95 × 1.5 + 50ms 이하 | 동일 |
 
 100% 단계에서는 직전 50% 단계의 검증된 stable 기준값을 고정하고 stable control
-요청을 계속 검사합니다. 표본 부족, `NaN`, query/권한 실패, telemetry 누락,
-지연된 로그는 모두 실패입니다.
+요청을 계속 검사합니다.
+
+배포 중 각 닫힌 window는 종료 후 기본 120초 수집 지연을 기다린 뒤 평가합니다.
+telemetry 누락 또는 표본 부족만 있으면 동일한 시작/종료 시각과 run/revision 조건으로
+30초 간격 재조회하며, 종료 후 총 420초(기본 120초 + 추가 300초)까지만 기다립니다.
+window를 이동하거나 표본 기준을 낮추지 않습니다. 기다리는 동안 control probe,
+candidate health 및 drift 검사를 계속하며 각 조회의 시각과 집계 표본을 해당
+gate evidence의 `attempts`에 저장합니다.
+
+추가 대기 한도에도 자료가 부족하면 실패하고 현재 지역의 복구를 시도합니다.
+관측된 절대 SLO/상대 회귀 위반은 다른 stream의 표본이 부족해도 즉시 실패하며,
+`NaN`, 중복 집계, query/권한 실패도 재시도하지 않습니다.
+production의 배포 전 organic baseline preflight는 기존처럼 단일 조회로
+fail-closed 처리합니다. 이 재시도는 배포 중 10%/50%/100% gate에 적용됩니다.
 
 이 수치는 예제 값이며 실제 서비스의 SLO, 오류 예산, 최소 표본, 수집 지연,
 피크 시간대에 맞게 재설계해야 합니다. `/healthz`의 200 응답만으로 승격하지

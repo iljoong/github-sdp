@@ -9,6 +9,13 @@ PROFILES = {
     "demo": {"bake": 180, "window": 60, "lag": 120, "samples": 20, "controls": 5},
 }
 
+TELEMETRY_RETRY_SECONDS = 30
+TELEMETRY_RETRY_TIMEOUT = 300
+
+
+class IncompleteTelemetry(RuntimeError):
+    """A closed window may still be waiting for log ingestion."""
+
 
 def query(snapshot, start, end, workspace):
     # All interpolated strings are validated as identifiers before use.
@@ -43,16 +50,21 @@ ContainerAppConsoleLogs_CL
 
 def metric(rows, revision, source, minimum):
     matching = [r for r in rows if r.get("Revision") == revision and r.get("Source") == source]
-    require(len(matching) == 1, f"Missing/ambiguous telemetry: {revision}/{source}")
+    require(len(matching) <= 1, f"Missing/ambiguous telemetry: {revision}/{source}")
+    if not matching:
+        raise IncompleteTelemetry(f"Missing telemetry: {revision}/{source}")
     row = matching[0]
     n = int(row["Samples"])
     errors, failures, p95 = int(row["Errors"]), int(row["BusinessFailures"]), float(row["P95"])
-    require(n >= minimum, f"Insufficient samples {revision}/{source}: {n} < {minimum}")
     require(0 <= errors <= n and 0 <= failures <= n and math.isfinite(p95) and p95 >= 0,
             "Invalid telemetry")
+    if n == 0:
+        raise IncompleteTelemetry(f"Insufficient samples {revision}/{source}: 0")
     error_rate = max(errors, failures) / n
     require(error_rate <= 0.01, f"Error/business-failure SLO exceeded: {revision}/{source}: {error_rate}")
     require(p95 <= 500, f"p95 SLO exceeded: {revision}/{source}: {p95} ms")
+    if n < minimum:
+        raise IncompleteTelemetry(f"Insufficient samples {revision}/{source}: {n} < {minimum}")
     return {"samples": n, "error_rate": error_rate, "p95": p95}
 
 
@@ -60,14 +72,31 @@ def gate(rows, snapshot, profile, weight, stable_reference=None):
     settings = PROFILES[profile]
     source = "organic" if profile == "production" else "demo"
     stable, candidate = snapshot["stable"], snapshot["candidate"]
-    controls = {rev: metric(rows, rev, "control", settings["controls"]) for rev in (stable, candidate)}
-    current = metric(rows, candidate, source, settings["samples"])
+    required = [(stable, "control", settings["controls"]),
+                (candidate, "control", settings["controls"]),
+                (candidate, source, settings["samples"])]
     if weight < 100:
-        reference = metric(rows, stable, source, settings["samples"])
+        required.append((stable, source, settings["samples"]))
     else:
         require(stable_reference is not None, "Missing pre-cutover stable business reference")
-        reference = stable_reference
-    require(current["error_rate"] <= reference["error_rate"] + 0.005, "Candidate error regression")
-    require(current["p95"] <= reference["p95"] * 1.5 + 50, "Candidate latency regression")
+    values, incomplete = {}, []
+    # Inspect every available stream before retrying: missing samples must not hide an SLO failure.
+    for rev, stream, minimum in required:
+        try:
+            value = metric(rows, rev, stream, 0)
+        except IncompleteTelemetry as error:
+            incomplete.append(str(error))
+            continue
+        values[rev, stream] = value
+        if value["samples"] < minimum:
+            incomplete.append(f"Insufficient samples {rev}/{stream}: {value['samples']} < {minimum}")
+    current = values.get((candidate, source))
+    reference = values.get((stable, source)) if weight < 100 else stable_reference
+    if current is not None and reference is not None:
+        require(current["error_rate"] <= reference["error_rate"] + 0.005, "Candidate error regression")
+        require(current["p95"] <= reference["p95"] * 1.5 + 50, "Candidate latency regression")
+    if incomplete:
+        raise IncompleteTelemetry("; ".join(incomplete))
+    controls = {rev: values[rev, "control"] for rev in (stable, candidate)}
     return {"candidate": current, "stable_reference": reference, "stable_live_controls": controls[stable],
             "candidate_live_controls": controls[candidate], "weight": weight, "source": source}

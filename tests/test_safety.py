@@ -218,6 +218,82 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(result["source"], "organic")
         self.assertIn("stable_live_controls", result)
 
+    def test_incomplete_telemetry_never_masks_available_slo_failures(self):
+        for change in ({"Errors": 100}, {"P95": 999}, {"Samples": -1}):
+            data = rows()[1:]
+            data[2].update(change)
+            with self.subTest(change=change), self.assertRaises(RuntimeError) as error:
+                metrics.gate(data, snapshot(), "production", 10)
+            self.assertNotIsInstance(error.exception, metrics.IncompleteTelemetry)
+        data = rows()
+        data[3].update({"Samples": 1, "P95": 200})
+        with self.assertRaisesRegex(RuntimeError, "latency regression"):
+            metrics.gate(data, snapshot(), "production", 10)
+
+    def test_bake_retries_same_closed_window_with_health_checks_and_bounded_deadline(self):
+        for outcome in ("success", "missing", "timeout", "slo", "drift", "health", "query-error"):
+            with self.subTest(outcome=outcome):
+                elapsed = [0.0]
+                now = common.utcnow()
+                incomplete = rows()
+                incomplete[3]["Samples"] = 14
+                bad = rows()
+                bad[3]["P95"] = 999
+                responses = [incomplete]
+                if outcome in ("success", "missing"):
+                    responses = [[] if outcome == "missing" else incomplete, rows()]
+                elif outcome == "slo":
+                    responses = [bad]
+                calls = []
+
+                def query(*args):
+                    calls.append(args)
+                    if outcome == "query-error":
+                        raise RuntimeError("query unavailable")
+                    return responses[min(len(calls) - 1, len(responses) - 1)], "fixed-query"
+
+                def guard(*args):
+                    if outcome == "drift" and elapsed[0] >= 10:
+                        raise RuntimeError("drift")
+                    return ({"properties": {"configuration": {"ingress": {"fqdn": "app.example"}}}}, {})
+
+                with patch.dict(os.environ, {"REGION": "kr", "LOG_ANALYTICS_WORKSPACE_ID": "workspace"}), \
+                     patch.dict(rollout.PROFILES, {"production": {
+                         "window": 1, "bake": 1, "lag": 0, "samples": 100, "controls": 30}}), \
+                     patch.object(rollout.time, "monotonic", side_effect=lambda: elapsed[0]), \
+                     patch.object(rollout.time, "sleep", side_effect=lambda seconds: elapsed.__setitem__(
+                         0, elapsed[0] + seconds)), \
+                     patch.object(rollout, "utcnow", side_effect=lambda: now + metrics.timedelta(seconds=elapsed[0])), \
+                     patch.object(rollout, "revision", return_value={"properties": {"fqdn": "stable.example"}}), \
+                     patch.object(rollout, "candidate_owned", return_value={"properties": {"fqdn": "candidate.example"}}), \
+                     patch.object(rollout, "ready", side_effect=lambda value:
+                                  outcome != "health" or elapsed[0] < 10), \
+                     patch.object(rollout, "guarded_state", side_effect=guard) as guarded, \
+                     patch.object(rollout, "request") as request, \
+                     patch.object(rollout, "query", side_effect=query), \
+                     patch.object(rollout, "save") as save, patch("builtins.print"):
+                    if outcome in ("success", "missing"):
+                        rollout.bake(snapshot(), "production", 10, snapshot()["traffic"], None)
+                        self.assertEqual(len(calls), 2)
+                        self.assertGreaterEqual(elapsed[0], 31)
+                        self.assertGreater(request.call_count, 4)
+                        record = save.call_args.args[1]
+                        self.assertEqual(len(record["attempts"]), 2)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, {
+                            "timeout": "Insufficient samples", "slo": "p95 SLO",
+                            "drift": "drift", "health": "Candidate health regressed",
+                            "query-error": "query unavailable"}[outcome]):
+                            rollout.bake(snapshot(), "production", 10, snapshot()["traffic"], None)
+                        if outcome == "timeout":
+                            self.assertEqual(elapsed[0], 301)
+                            self.assertEqual(len(calls), 11)
+                            self.assertEqual(save.call_args.args[1]["status"], "failed")
+                            self.assertGreater(guarded.call_count, 3)
+                        else:
+                            self.assertEqual(len(calls), 2 if outcome in ("drift", "health") else 1)
+                    self.assertTrue(all(call == calls[0] for call in calls))
+
     def test_template_normalization_preserves_nondefault_resource_and_scale_drift(self):
         original = template()
         original["containers"][0]["resources"] = {"cpu": 0.25, "memory": "0.5Gi"}

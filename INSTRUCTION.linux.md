@@ -203,6 +203,13 @@ helper가 중단합니다. 누락된 role assignment나 variable을 복구할 �
 
 ## 5. 릴리스 및 복구 workflow
 
+Demo 부하는 shared app endpoint에 초당 10건을 목표로 독립적으로 전송하므로
+Azure 조회 및 telemetry 대기 중에도 계속 실행됩니다. worker 최대 16개와
+실행/대기 요청 합계 최대 32개로 제한하며 요청 실패/큐 포화는 명시적으로 실패합니다.
+단계 종료 시 부하를 중단하고 진행 중 요청을 정리합니다. 목표/실제 RPS,
+제출/완료 수 및 오류는 `evidence/<region>/demo-load-<weight>.json`에 기록합니다.
+표본/SLO 기준은 유지하며 production에는 합성 부하를 생성하지 않습니다.
+
 배포 중 gate는 기본 120초 로그 수집 대기 후 telemetry 누락/표본 부족에 한해
 같은 닫힌 window를 30초 간격으로 추가 최대 300초 재조회합니다.
 표본 기준은 그대로 유지하며 health/drift 검사를 계속합니다. 관측된 SLO 위반이나

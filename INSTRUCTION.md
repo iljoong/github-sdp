@@ -282,6 +282,17 @@ workspace의 customer GUID입니다.
 기다립니다. 실제 사용자 SLI를 검증하지 않습니다. 로그 표본이 늦게 도착하면
 아래의 제한된 telemetry 재시도 시간만큼 더 걸릴 수 있습니다.
 
+합성 부하는 모니터링 루프와 독립된 scheduler에서 shared app endpoint의 `/work`로
+초당 10건을 목표로 전송합니다. Azure CLI 조회, control probe 및 telemetry 재시도
+중에도 계속 실행되며 실제 90/10 등의 라우팅을 통과합니다. HTTP worker는 최대
+16개, 실행/대기 요청은 합계 최대 32개로 제한합니다. 요청 오류나 큐 포화는
+명시적 실패로 처리하고, 단계 종료/오류 시 부하를 중단한 뒤 진행 중 요청을 정리합니다.
+
+단계별 `evidence/<region>/demo-load-<weight>.json`에 목표 RPS, 제출/완료 요청 수,
+실행 시간, 실제 완료 RPS 및 부하 생성 오류를 기록하고 콘솔에도 출력합니다.
+실제 속도와 candidate 배분은 네트워크/라우팅에 따라 달라지므로 표본 기준을
+보장하거나 완화하지 않습니다. production 프로필에서는 합성 부하를 생성하지 않습니다.
+
 ```powershell
 gh workflow run release.yml --repo $repo --ref main -f profile=demo
 gh run list --repo $repo --workflow release.yml

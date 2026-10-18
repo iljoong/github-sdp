@@ -3,8 +3,10 @@ import concurrent.futures
 import json
 import os
 import signal
+import threading
 import time
 import urllib.request
+from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 
@@ -26,6 +28,61 @@ def request(fqdn, path, source, run, expected_revision=None):
         if path == "/work":
             require(body.get("ok") is True and body.get("result") == 42, "Business contract failed")
         return body
+
+
+def generate_demo_traffic(stop, fqdn, run, stats):
+    pending = set()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+        next_request = time.monotonic()
+        try:
+            while not stop.is_set():
+                for future in list(pending):
+                    if future.done():
+                        pending.remove(future)
+                        future.result()
+                        stats["completed"] += 1
+                delay = next_request - time.monotonic()
+                if delay > 0:
+                    stop.wait(delay)
+                    continue
+                require(len(pending) < 32, "Demo load generator saturated: 32 requests outstanding")
+                pending.add(pool.submit(request, fqdn, "/work", "demo", run))
+                stats["submitted"] += 1
+                # No unbounded catch-up bursts after scheduler delays.
+                next_request = max(next_request + 0.1, time.monotonic())
+        finally:
+            for future in pending:
+                future.result()
+                stats["completed"] += 1
+
+
+@contextmanager
+def demo_traffic(profile, snapshot, fqdn, weight):
+    if profile != "demo":
+        yield lambda: None
+        return
+    stop = threading.Event()
+    stats = {"target_rps": 10, "submitted": 0, "completed": 0,
+             "run_id": snapshot["run_id"], "weight": weight, "started_at": iso(utcnow())}
+    started = time.monotonic()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as scheduler:
+        task = scheduler.submit(generate_demo_traffic, stop, fqdn, snapshot["run_id"], stats)
+        try:
+            yield lambda: task.result() if task.done() else None
+        finally:
+            stop.set()
+            try:
+                task.result()
+                stats["status"] = "completed"
+            except Exception as error:
+                stats.update({"status": "failed", "error": str(error)})
+                raise
+            finally:
+                elapsed = time.monotonic() - started
+                stats.update({"finished_at": iso(utcnow()), "elapsed_seconds": elapsed,
+                              "achieved_rps": stats["completed"] / elapsed if elapsed > 0 else 0})
+                save(Path("evidence") / os.environ["REGION"] / f"demo-load-{weight}.json", stats)
+                print(json.dumps({"demo_load": stats}), flush=True)
 
 
 def wait_ready(snapshot):
@@ -73,11 +130,11 @@ def baseline_preflight(snapshot, profile):
 
 def bake(snapshot, profile, weight, expected_weights, stable_reference):
     settings = PROFILES[profile]
-    started = utcnow()
     stable_fqdn = props(revision(snapshot["stable"]))["fqdn"]
     candidate_fqdn = props(candidate_owned(snapshot))["fqdn"]
     shared_fqdn = props(guarded_state(snapshot, expected_weights)[0])["configuration"]["ingress"]["fqdn"]
     workspace = os.environ["LOG_ANALYTICS_WORKSPACE_ID"]
+    started = utcnow()
     next_end = started + timedelta(seconds=settings["window"])
     finish = started + timedelta(seconds=settings["bake"])
     next_control = next_guard = 0.0
@@ -85,9 +142,9 @@ def bake(snapshot, profile, weight, expected_weights, stable_reference):
     attempts = []
     evidence = Path("evidence") / os.environ["REGION"]
     # Demo traffic is deliberately NOT used by the production gate.
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-        pending = []
+    with demo_traffic(profile, snapshot, shared_fqdn, weight) as check_load:
         while next_end <= finish:
+            check_load()
             now = time.monotonic()
             if now >= next_control:
                 for rev, fqdn in [(snapshot["stable"], stable_fqdn), (snapshot["candidate"], candidate_fqdn)]:
@@ -98,17 +155,11 @@ def bake(snapshot, profile, weight, expected_weights, stable_reference):
                 guarded_state(snapshot, expected_weights)
                 require(ready(candidate_owned(snapshot)), "Candidate health regressed")
                 next_guard = now + 60
-            if profile == "demo":
-                # Reuse no cookies: ACA affinity is disabled in bootstrap.
-                pending.append(pool.submit(request, shared_fqdn, "/work", "demo", snapshot["run_id"]))
-                if len(pending) >= 20:
-                    for future in pending:
-                        future.result()
-                    pending.clear()
             if (utcnow() >= next_end + timedelta(seconds=settings["lag"])
                     and time.monotonic() >= next_query):
                 begin = next_end - timedelta(seconds=settings["window"])
                 rows, kql = query(snapshot, begin, next_end, workspace)
+                check_load()
                 record = {"start": iso(begin), "end": iso(next_end), "rows": rows, "query": kql,
                           "profile": profile, "run_id": snapshot["run_id"]}
                 filename = evidence / f"gate-{weight}-{int(next_end.timestamp())}.json"
@@ -138,8 +189,6 @@ def bake(snapshot, profile, weight, expected_weights, stable_reference):
                 next_query = 0.0
                 attempts = []
             time.sleep(0.1 if profile == "demo" else 1)
-        for future in pending:
-            future.result()
     guarded_state(snapshot, expected_weights)
     return stable_reference
 

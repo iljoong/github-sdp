@@ -15,27 +15,27 @@ Azure 실제 성공을 주장하지 않는다. 먼저 별도 비운영 구독에
 Azure Container Apps, ACR, Log Analytics, GitHub Actions 실행 비용이 발생한다.
 
 지역 순서:
-  Korea Central(koreacentral) -> Germany West Central(germanywestcentral)
-  -> Brazil South(brazilsouth)
+  Korea Central(koreacentral) -> Southeast Asia(southeastasia)
+  -> West US(westus)
 서비스/SKU/Consumption profile의 구독별 지역 지원, 할당량, 조직 Azure Policy,
 Log Analytics 사용 가능 여부를 운영자가 사전 확인한다. 이름 목록에 있다고
 배포 용량/권한이 보장되는 것은 아니다. 세 지역은 각자 다른 ACA 환경/앱/
 Log Analytics workspace를 사용한다. ACR은 Korea Central에 하나이다.
-동일한 registry/repository@sha256 digest를 세 지역 모두 사용한다. 독일/브라질
+동일한 registry/repository@sha256 digest를 세 지역 모두 사용한다. Southeast Asia/West US
 원격 image pull의 지연, 전송비, registry 장애 의존성과 데이터 주권을 검토한다.
 필요하면 Premium 지리 복제/지역 registry를 설계하되 digest 동일성을 검증한다.
 
 실행 흐름:
   build 환경 OIDC -> unittest -> linux/amd64 image 한 번 build/push
   -> release-RUN_ID artifact에 digest/repo/commit/run 기록
-  -> prod-kr 승인 -> 한국 10/50/100% -> prod-de 승인 -> 독일 10/50/100%
-  -> prod-br 승인 -> 브라질 10/50/100%.
+  -> prod-kr 승인 -> 한국 10/50/100% -> prod-sea 승인 -> Southeast Asia 10/50/100%
+  -> prod-usw 승인 -> West US 10/50/100%.
 각 지역은 보호된 reusable workflow이다. matrix 병렬 배포가 아니다.
 다음 지역은 이전 지역 job의 success에만 실행된다.
 
-독일 실패 시 독일만 자동 복구하고 건강한 한국은 그대로 둔다. 브라질 실패 시
-브라질만 자동 복구한다. 전 지역 원자성이나 분산 트랜잭션을 보장하지 않는다.
-전체 릴리스 복구는 별도 restore workflow의 all로 브라질->독일->한국 순서로
+Southeast Asia 실패 시 해당 지역만 자동 복구하고 건강한 한국은 그대로 둔다. West US 실패 시
+West US만 자동 복구한다. 전 지역 원자성이나 분산 트랜잭션을 보장하지 않는다.
+전체 릴리스 복구는 별도 restore workflow의 all로 West US->Southeast Asia->한국 순서로
 시도한다. 일부 실패해도 나머지 지역을 시도한다.
 
 1. 준비물과 로컬 확인
@@ -95,7 +95,7 @@ ABAC repository permission mode로 바꾼 경우 AcrPush/AcrPull을 그대로 �
 생성:
   PREFIX-shared: ACR Basic, image pull 전용 user-assigned managed identity,
                  그 identity의 registry scope AcrPull.
-  PREFIX-kr/de/br: workspace, ACA Consumption 환경, 앱, startup/readiness/
+  PREFIX-kr/sea/usw: workspace, ACA Consumption 환경, 앱, startup/readiness/
                   liveness probes, minReplicas=1, maxReplicas=3.
   초기 bootstrap image도 digest로 고정한다.
   Multiple revisions + 명시적 APP--bootstrap=100. latestRevision=true 없음.
@@ -109,8 +109,8 @@ ABAC repository permission mode로 바꾼 경우 AcrPush/AcrPull을 그대로 �
   az deployment group show -g "$prefix-shared" -n shared
   az acr repository show -n $acr --image 'safe-demo:실제-bootstrap-tag'
   # 위 결과의 loginServer, pullIdentityId, digest를 아래에 입력
-  az group create -n "$prefix-br" -l brazilsouth
-  az deployment group create -g "$prefix-br" -n bootstrap --template-file infra\region.bicep --parameters location=brazilsouth "appName=$prefix-br-app" image=REGISTRY.azurecr.io/safe-demo@sha256:DIGEST acrServer=REGISTRY.azurecr.io pullIdentityId=실제-identity-resource-ID
+  az group create -n "$prefix-usw" -l westus
+  az deployment group create -g "$prefix-usw" -n bootstrap --template-file infra\region.bicep --parameters location=westus "appName=$prefix-usw-app" image=REGISTRY.azurecr.io/safe-demo@sha256:DIGEST acrServer=REGISTRY.azurecr.io pullIdentityId=실제-identity-resource-ID
 
 infra\region.bicep는 반드시 bootstrap 전용이다. 라이브 앱에 재배포하면
 template/traffic을 bootstrap으로 덮어쓰므로 복구/업그레이드 수단이 아니다.
@@ -121,8 +121,8 @@ template/traffic을 bootstrap으로 덮어쓰므로 복구/업그레이드 수�
 
 GitHub Settings -> Environments에 다음 7개를 미리 만든다:
   build
-  prod-kr, prod-de, prod-br
-  prod-rollback-kr, prod-rollback-de, prod-rollback-br
+  prod-kr, prod-sea, prod-usw
+  prod-rollback-kr, prod-rollback-sea, prod-rollback-usw
 
 prod-*와 rollback 환경에 required reviewers를 지정하고 승인자 본인의 배포
 승인을 막는다(Prevent self-review). main만 deployment branch로 허용하고
@@ -161,7 +161,7 @@ iss/aud/sub/repository/repository_id/repository_owner_id/ref/환경을 검토한
 
   .\scripts\configure-identity.ps1 -Repository $repo -Environment build -SubscriptionId $subscription -AcrName $acr -ClaimsFile "state\oidc-claims\oidc-claims-$inspectRun-build\claims-build.json"
   $outputs = Get-Content state\bootstrap-outputs.json -Raw | ConvertFrom-Json
-  foreach ($region in @('kr','de','br')) {
+  foreach ($region in @('kr','sea','usw')) {
     $r = $outputs.$region
     foreach ($environment in @("prod-$region", "prod-rollback-$region")) {
       .\scripts\configure-identity.ps1 -Repository $repo -Environment $environment -SubscriptionId $subscription -ResourceGroup $r.RESOURCE_GROUP -ContainerApp $r.CONTAINER_APP -WorkspaceResourceId $r.WORKSPACE_RESOURCE_ID -WorkspaceCustomerId $r.LOG_ANALYTICS_WORKSPACE_ID -ClaimsFile "state\oidc-claims\oidc-claims-$inspectRun-$environment\claims-$environment.json"
@@ -202,10 +202,10 @@ GitHub environment variables(대소문자 그대로):
   기본 환경 subject의 형식 예(실제 token 검사를 대신하지 않음):
     immutable:
       repo:OWNER@OWNER_ID/REPOSITORY@REPOSITORY_ID:environment:prod-kr
-      repo:OWNER@OWNER_ID/REPOSITORY@REPOSITORY_ID:environment:prod-rollback-de
+      repo:OWNER@OWNER_ID/REPOSITORY@REPOSITORY_ID:environment:prod-rollback-sea
     legacy(그 형식을 유지하는 기존 저장소만):
       repo:OWNER/REPOSITORY:environment:prod-kr
-  build/독일/브라질/복구는 각각 정확한 environment 이름으로 바뀐다. ID를
+  build/Southeast Asia/West US/복구는 각각 정확한 environment 이름으로 바뀐다. ID를
   추측하거나 repo.created_at만 보고 형식을 결정하지 않는다. 조직/저장소 custom
   subject template, immutable opt-in, rename/transfer에 따라 다를 수 있다.
   configure-identity.ps1은 ClaimsFile의 실제 sub를 사용하며 현재 GitHub API의
@@ -390,7 +390,7 @@ Runner와 독립된 Alert Manager / out-of-band 복구(운영 필수):
   Get-Content state\inspect-kr\baseline-kr.json
 
 단일 지역:
-  gh workflow run restore.yml --repo $repo --ref main -f source_run_id=ORIGINAL_RUN_ID -f region=de
+  gh workflow run restore.yml --repo $repo --ref main -f source_run_id=ORIGINAL_RUN_ID -f region=sea
 전체 릴리스:
   gh workflow run restore.yml --repo $repo --ref main -f source_run_id=ORIGINAL_RUN_ID -f region=all
 
@@ -398,7 +398,7 @@ rollback 환경 승인 -> 원본 release.yml/main/completed/repo/commit 확인
 -> 원본 run의 immutable baseline artifact 다운로드 -> 현재 Azure drift 확인
 -> 해당 stable의 원본 traffic 복구. 소스 workflow는 본 저장소의 workflow_dispatch
 release.yml이어야 하며, artifact filename/run/context를 재검증한다.
-all은 br,de,kr를 순차 시도하며 앞 지역 실패에도 다음을 시도한다.
+all은 usw,sea,kr를 순차 시도하며 앞 지역 실패에도 다음을 시도한다.
 원본 릴리스에서 시작하지 않은 지역은 baseline artifact가 없으므로 그 복구 job은
 안전하게 실패(변경 없음)한다. 실패가 모두 "미시작 지역"인지 실제 복구 실패인지
 로그를 구분한다. 이런 경우 실제 변경한 지역만 골라 복구하는 것이 명확하다.

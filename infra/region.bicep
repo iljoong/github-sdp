@@ -2,8 +2,8 @@ targetScope = 'resourceGroup'
 
 @allowed([
   'koreacentral'
-  'germanywestcentral'
-  'brazilsouth'
+  'southeastasia'
+  'westus'
 ])
 param location string
 

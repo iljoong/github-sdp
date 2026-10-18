@@ -1,0 +1,206 @@
+# 안전 배포 예제 실행 가이드 (Linux Bash)
+
+이 문서는 Azure Container Apps 안전 배포 예제의 Linux 전용 명령을 설명합니다.
+배포 동작, health gate 기준, 복구 제약 및 운영상 주의 사항은
+[PowerShell 가이드](INSTRUCTION.md)와 동일합니다.
+
+## 1. 사전 요구 사항
+
+- Bash 4+
+- Python 3.13
+- Bicep을 포함한 Azure CLI
+- Linux container engine이 있는 Docker
+- Git, GitHub CLI (`gh`), `jq`
+
+최초 Azure 설치자는 구독에서 Contributor와 Role Based Access Control
+Administrator(또는 Owner), 그리고 Entra 애플리케이션 및 서비스 주체 생성 권한이
+필요합니다. provisioning script 실행 전에 Azure와 GitHub CLI에 로그인하세요.
+
+최초 통합 테스트에는 비운영 구독을 사용하세요. 아래 명령은 실제 Azure 리소스를
+생성하며 비용이 발생할 수 있습니다.
+
+## 2. 로컬 검증
+
+저장소 루트에서 다음 명령을 실행합니다.
+
+```bash
+python3 -m unittest discover -s tests -v
+python3 -m compileall -q app scripts tests
+az bicep build --file infra/shared.bicep --stdout
+az bicep build --file infra/region.bicep --stdout
+```
+
+앱을 시작하고 다른 터미널에서 endpoint를 확인합니다.
+
+```bash
+python3 app/server.py
+```
+
+```bash
+curl --fail http://localhost:8080/healthz
+curl --fail http://localhost:8080/work
+```
+
+로컬 장애 주입을 시험하려면 서버 실행 전에 같은 셸에서 환경 변수를 설정합니다.
+
+```bash
+export DEMO_FAILURE_PERCENT=100 # /work returns 503
+export DEMO_LATENCY_MS=600      # Inject /work latency in milliseconds
+python3 app/server.py
+```
+
+컨테이너를 로컬에서 빌드하고 실행합니다.
+
+```bash
+docker build --platform linux/amd64 -t safe-demo:local app
+docker run --rm -p 8080:8080 safe-demo:local
+```
+
+## 3. 최초 Azure bootstrap
+
+> Bootstrap은 최초 생성 전용입니다. 라이브 앱에 재실행하거나 릴리스, 복구,
+> 업그레이드 수단으로 사용하지 마세요.
+
+로그인하고 배포 변수를 설정합니다.
+
+```bash
+az login
+gh auth login
+
+subscription='25d518c0-9902-40e7-b3de-9b9593bdfe23'
+repo='iljoong/github-sdp'
+acr='iksdpdevops'
+prefix='safeaca'
+
+az account set --subscription "$subscription"
+az bicep version
+docker info
+```
+
+설치자는 새 ACR에 push할 수 있어야 합니다. RBAC registry를 사용하는 경우
+필요하다면 registry scope에서 설치자에게 `AcrPush`를 부여합니다.
+
+```bash
+./scripts/bootstrap.sh \
+  --subscription-id "$subscription" \
+  --acr-name "$acr" \
+  --prefix "$prefix"
+```
+
+스크립트는 공유 ACR 및 pull identity를 만든 다음 세 지역의 resource group,
+workspace, ACA environment 및 앱을 생성합니다. identity 설정에 필요한 출력은
+`state/bootstrap-outputs.json`에 기록합니다. `state/` 아래 파일을 커밋하지 마세요.
+
+## 4. GitHub Environment 및 OIDC
+
+저장소 설정에서 다음 일곱 GitHub Environment를 만들고 보호하세요.
+
+```text
+build
+prod-kr, prod-de, prod-br
+prod-rollback-kr, prod-rollback-de, prod-rollback-br
+```
+
+배포 branch를 `main`으로 제한하고 production 및 rollback environment에 required
+reviewer를 설정하세요. 가능한 경우 self-review와 관리자 우회를 차단하세요.
+신뢰할 수 없는 pull request 코드가 권한 있는 workflow에서 실행되지 않도록 하세요.
+
+workflow 파일을 `main`에 push한 다음 보호된 environment job에서 실제 claim을
+검사합니다. bearer JWT 전체를 출력하거나 보관하지 마세요.
+
+```bash
+gh workflow run oidc-inspect.yml --repo "$repo" --ref main
+gh run list --repo "$repo" --workflow oidc-inspect.yml
+inspect_run='RUN-ID-FROM-THE-LIST'
+gh run watch "$inspect_run" --repo "$repo"
+gh run download "$inspect_run" --repo "$repo" -D state/oidc-claims
+```
+
+각 environment 승인 후 claims metadata의 `iss`, `aud`, `sub`, repository ID,
+branch 및 environment를 검토합니다.
+
+### build identity 구성
+
+helper는 검사한 claim `sub`를 사용하고, client secret 없이 federated credential을
+만들며, 최소 Azure role을 할당하고 GitHub Environment variable을 설정합니다.
+
+```bash
+./scripts/configure-identity.sh \
+  --repository "$repo" \
+  --environment build \
+  --subscription-id "$subscription" \
+  --acr-name "$acr" \
+  --claims-file "state/oidc-claims/oidc-claims-${inspect_run}-build/claims-build.json"
+```
+
+### 지역별 배포 및 rollback identity 구성
+
+다음 반복문은 지역마다 배포 및 rollback용 identity를 별도로 구성합니다.
+
+```bash
+for region in kr de br; do
+  resource_group=$(jq -er --arg region "$region" '.[$region].RESOURCE_GROUP' state/bootstrap-outputs.json)
+  container_app=$(jq -er --arg region "$region" '.[$region].CONTAINER_APP' state/bootstrap-outputs.json)
+  workspace_resource_id=$(jq -er --arg region "$region" '.[$region].WORKSPACE_RESOURCE_ID' state/bootstrap-outputs.json)
+  workspace_customer_id=$(jq -er --arg region "$region" '.[$region].LOG_ANALYTICS_WORKSPACE_ID' state/bootstrap-outputs.json)
+
+  for environment in "prod-$region" "prod-rollback-$region"; do
+    ./scripts/configure-identity.sh \
+      --repository "$repo" \
+      --environment "$environment" \
+      --subscription-id "$subscription" \
+      --resource-group "$resource_group" \
+      --container-app "$container_app" \
+      --workspace-resource-id "$workspace_resource_id" \
+      --workspace-customer-id "$workspace_customer_id" \
+      --claims-file "state/oidc-claims/oidc-claims-${inspect_run}-${environment}/claims-${environment}.json"
+  done
+done
+```
+
+`state/identity-<environment>.json`이 이미 존재하면 중복 identity 생성을 막기 위해
+helper가 중단합니다. 누락된 role assignment나 variable을 복구할 때는 기록된 ID를
+사용하세요. 기록을 삭제한 뒤 무작정 재실행하지 마세요.
+
+## 5. 릴리스 및 복구 workflow
+
+전체 배포 경로를 검증하려면 demo profile을 실행합니다.
+
+```bash
+gh workflow run release.yml --repo "$repo" --ref main -f profile=demo
+gh run list --repo "$repo" --workflow release.yml
+gh run watch 'RELEASE-RUN-ID'
+```
+
+실제 유기적 트래픽과 service-level indicator가 준비된 경우에만 production
+profile을 사용합니다.
+
+```bash
+gh workflow run release.yml --repo "$repo" --ref main -f profile=production
+```
+
+실패 처리, 보호된 복구, health gate 기준, 운영 전 점검표 및 운영상 한계는
+[PowerShell 가이드](INSTRUCTION.md)의 7~10절을 따르세요.
+
+단일 지역 복구:
+
+```bash
+gh workflow run restore.yml \
+  --repo "$repo" \
+  --ref main \
+  -f source_run_id=ORIGINAL_RELEASE_RUN_ID \
+  -f region=de
+```
+
+전체 릴리스 복구 (브라질, 독일, 한국 순):
+
+```bash
+gh workflow run restore.yml \
+  --repo "$repo" \
+  --ref main \
+  -f source_run_id=ORIGINAL_RELEASE_RUN_ID \
+  -f region=all
+```
+
+restore는 보호된 rollback environment의 승인을 요구하며, traffic을 변경하기 전에
+원본 release와 immutable baseline artifact를 검증합니다.

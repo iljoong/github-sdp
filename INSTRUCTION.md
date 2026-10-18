@@ -2,6 +2,7 @@
 
 이 문서는 이 저장소의 Azure Container Apps 안전 배포 예제를 처음 구성하고,
 검증하고, 복구하는 절차를 설명합니다. 명령은 PowerShell 7 기준입니다.
+Linux Bash 명령은 [INSTRUCTION.linux.md](INSTRUCTION.linux.md)를 참조하세요.
 
 ## 1. 동작 모델
 
@@ -11,14 +12,14 @@
 2. Linux/amd64 이미지를 한 번만 빌드하여 ACR에 push하고 immutable digest를
    `release-<run-id>` artifact에 기록합니다.
 3. `prod-kr` 승인 후 한국에서 10% → 50% → 100%로 승격합니다.
-4. 성공한 경우에만 `prod-de`, 이어서 `prod-br`에서 같은 과정을 반복합니다.
+4. 성공한 경우에만 `prod-sea`, 이어서 `prod-usw`에서 같은 과정을 반복합니다.
 
 각 지역은 별도의 ACA 환경, 컨테이너 앱, Log Analytics workspace를 사용합니다.
 세 지역은 하나의 Korea Central ACR에 있는 동일한 image digest를 pull합니다.
 
-지역별 배포는 병렬 matrix가 아닙니다. 독일 실패 시 독일만 자동 복구하고,
+지역별 배포는 병렬 matrix가 아닙니다. Southeast Asia 실패 시 해당 지역만 자동 복구하고,
 건강한 한국 배포는 되돌리지 않습니다. 전체 릴리스 복구는 별도 restore workflow가
-브라질 → 독일 → 한국 순서로 시도합니다.
+West US → Southeast Asia → 한국 순서로 시도합니다.
 
 ### 안전 장치
 
@@ -59,6 +60,17 @@ GitHub-hosted Ubuntu 24.04 runner, Actions artifact v4, 그리고 required revie
 - 필요한 지역별 할당량과 Azure Policy 제한을 확인합니다.
 - ACR은 Korea Central에 하나만 생성됩니다. 원격 image pull의 지연, 전송 비용,
   registry 장애 의존성 및 데이터 주권을 검토하세요.
+- 대상 지역은 Korea Central, Southeast Asia(`southeastasia`), West US(`westus`)입니다.
+  `Microsoft.App`(managedEnvironments/containerApps), `Microsoft.OperationalInsights`,
+  `Microsoft.ContainerRegistry`, `Microsoft.ManagedIdentity`와 ACA Consumption
+  workload profile이 세 지역에서 제공되는 것을 확인했지만, 구독별 지원과 할당량은
+  다를 수 있으므로 다음으로 직접 확인하세요. West US는 Azure에서 "Other"(비권장)
+  범주의 이전 지역이므로 가용성 영역 지원과 용량 제약을 별도로 검토하세요.
+  ```text
+  az containerapp env workload-profile list-supported -l southeastasia
+  az containerapp env workload-profile list-supported -l westus
+  az rest --method get --url "https://management.azure.com/subscriptions/<id>/providers/Microsoft.App/locations/<region>/usages?api-version=2024-03-01"
+  ```
 - 반드시 비운영 구독에서 통합 검증을 마친 후 운영 요구 사항에 맞게 확장하세요.
 
 ## 3. 로컬 검증
@@ -102,6 +114,10 @@ docker run --rm -p 8080:8080 safe-demo:local
 
 ## 4. 최초 Azure bootstrap
 
+PowerShell 스크립트는 provider 등록, 공유 인프라, 이미지 build/push, RBAC 대기,
+지역별 배포 및 결과 저장 단계에 타임스탬프가 있는 콘솔 진행 메시지를 출력합니다.
+Azure 배포는 몇 분 걸릴 수 있으며, 완료 메시지는 해당 명령이 성공한 뒤 출력됩니다.
+
 > `bootstrap.ps1` 및 `infra\region.bicep`는 최초 생성 전용입니다. 라이브 앱에
 > 재실행하거나 복구/업그레이드 수단으로 사용하지 마세요.
 
@@ -137,8 +153,8 @@ docker info
 | --- | --- |
 | `$prefix-shared` | Basic ACR 및 image pull 전용 user-assigned managed identity |
 | `$prefix-kr` | Korea Central workspace, ACA 환경, 앱 |
-| `$prefix-de` | Germany West Central workspace, ACA 환경, 앱 |
-| `$prefix-br` | Brazil South workspace, ACA 환경, 앱 |
+| `$prefix-sea` | Southeast Asia workspace, ACA 환경, 앱 |
+| `$prefix-usw` | West US workspace, ACA 환경, 앱 |
 | `state\bootstrap-outputs.json` | 이후 OIDC 설정에 필요한 앱 및 workspace 식별자 |
 
 `state\`는 Git 추적 대상이 아닙니다. 파일을 커밋하지 마세요.
@@ -151,8 +167,8 @@ GitHub 저장소 **Settings → Environments**에서 다음 일곱 환경을 만
 
 ```text
 build
-prod-kr, prod-de, prod-br
-prod-rollback-kr, prod-rollback-de, prod-rollback-br
+prod-kr, prod-sea, prod-usw
+prod-rollback-kr, prod-rollback-sea, prod-rollback-usw
 ```
 
 권장 설정:
@@ -206,7 +222,7 @@ principal, federated credential, 최소 Azure RBAC, GitHub Environment variables
 ```powershell
 $outputs = Get-Content state\bootstrap-outputs.json -Raw | ConvertFrom-Json
 
-foreach ($region in @('kr', 'de', 'br')) {
+foreach ($region in @('kr', 'sea', 'usw')) {
   $r = $outputs.$region
   foreach ($environment in @("prod-$region", "prod-rollback-$region")) {
     .\scripts\configure-identity.ps1 `
@@ -312,7 +328,7 @@ gh workflow run restore.yml `
   --repo $repo `
   --ref main `
   -f source_run_id=ORIGINAL_RELEASE_RUN_ID `
-  -f region=de
+  -f region=sea
 ```
 
 ### 전체 릴리스 복구
@@ -327,7 +343,7 @@ gh workflow run restore.yml `
 
 restore는 보호된 rollback environment의 승인을 요구하고, 원본 `release.yml` run의
 repository, commit, 완료 상태 및 immutable baseline artifact를 다시 검증합니다.
-`all`은 브라질, 독일, 한국 순으로 실행하며 앞 지역의 실패에도 다음 지역을
+`all`은 West US, Southeast Asia, 한국 순으로 실행하며 앞 지역의 실패에도 다음 지역을
 시도합니다. 시작되지 않은 지역에 baseline artifact가 없으면 안전하게 실패하며
 변경하지 않습니다.
 

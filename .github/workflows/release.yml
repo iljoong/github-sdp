@@ -1,4 +1,4 @@
-name: Safe ACA release - Korea then Germany then Brazil
+name: Safe ACA release - Korea then Southeast Asia then West US
 on:
   workflow_dispatch:
     inputs:
@@ -73,7 +73,7 @@ jobs:
       region: kr
       environment: prod-kr
       profile: ${{ inputs.profile }}
-  germany:
+  southeastasia:
     needs: korea
     if: needs.korea.result == 'success'
     uses: ./.github/workflows/region.yml
@@ -82,18 +82,18 @@ jobs:
       actions: read
       id-token: write
     with:
-      region: de
-      environment: prod-de
+      region: sea
+      environment: prod-sea
       profile: ${{ inputs.profile }}
-  brazil:
-    needs: germany
-    if: needs.germany.result == 'success'
+  westus:
+    needs: southeastasia
+    if: needs.southeastasia.result == 'success'
     uses: ./.github/workflows/region.yml
     permissions:
       contents: read
       actions: read
       id-token: write
     with:
-      region: br
-      environment: prod-br
+      region: usw
+      environment: prod-usw
       profile: ${{ inputs.profile }}

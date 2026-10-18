@@ -7,7 +7,7 @@ GitHub Actions, Azure Container Apps(ACA), Azure Container Registry(ACR)를 사�
 
 - GitHub Actions OIDC를 통한 비밀 없는 Azure 인증
 - 이미지 1회 빌드 및 `sha256` digest 고정 배포
-- Korea Central → Germany West Central → Brazil South 순차 승격
+- Korea Central → Southeast Asia → West US 순차 승격
 - 지역별 GitHub Environment 승인과 최소 권한 배포 identity
 - 10% → 50% → 100% 명시적 트래픽 분할 카나리
 - 로그 기반 fail-closed health gate 및 지역 단위 자동 복구
@@ -23,9 +23,9 @@ build/test → image push (digest 기록)
              ↓
        승인: prod-kr → KR 카나리
              ↓
-       승인: prod-de → DE 카나리
+       승인: prod-sea → SEA 카나리
              ↓
-       승인: prod-br → BR 카나리
+       승인: prod-usw → USW 카나리
 ```
 
 한 지역에서 실패하면 해당 지역만 baseline 트래픽으로 복구하며, 이미 건강한
@@ -33,7 +33,9 @@ build/test → image push (digest 기록)
 
 ## 빠른 로컬 확인
 
-필수 도구: PowerShell 7, Python 3.13, Docker Linux engine, Azure CLI, Bicep CLI.
+필수 도구: PowerShell 7 (Linux Bash 명령은
+[Linux 가이드](INSTRUCTION.linux.md) 참조), Python 3.13, Docker Linux engine,
+Azure CLI, Bicep CLI, GitHub CLI (`gh`), `jq` (Linux Bash 스크립트 사용 시).
 
 ```powershell
 python -m unittest discover -s tests -v
@@ -63,6 +65,9 @@ docker run --rm -p 8080:8080 safe-demo:local
 
 명령, 권한, 환경 설정, health gate 기준 및 복구 runbook은
 [INSTRUCTION.md](INSTRUCTION.md)를 참조하세요.
+
+기본 PowerShell 7 가이드는 [INSTRUCTION.md](INSTRUCTION.md),
+Linux Bash 가이드는 [INSTRUCTION.linux.md](INSTRUCTION.linux.md)를 참조하세요.
 
 ## 주요 구성
 

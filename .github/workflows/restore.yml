@@ -7,10 +7,10 @@ on:
         required: true
         type: string
       region:
-        description: all attempts Brazil then Germany then Korea; unstarted region has no snapshot and fails safely
+        description: all attempts West US then Southeast Asia then Korea; unstarted region has no snapshot and fails safely
         required: true
         type: choice
-        options: [all, kr, de, br]
+        options: [all, kr, sea, usw]
         default: all
 permissions:
   contents: read
@@ -20,23 +20,23 @@ concurrency:
   group: safe-aca-production
   cancel-in-progress: false
 jobs:
-  brazil:
-    if: github.ref == 'refs/heads/main' && (inputs.region == 'all' || inputs.region == 'br')
+  westus:
+    if: github.ref == 'refs/heads/main' && (inputs.region == 'all' || inputs.region == 'usw')
     uses: ./.github/workflows/restore-region.yml
     with:
-      region: br
-      environment: prod-rollback-br
+      region: usw
+      environment: prod-rollback-usw
       source_run_id: ${{ inputs.source_run_id }}
-  germany:
-    needs: brazil
-    if: always() && github.ref == 'refs/heads/main' && (inputs.region == 'all' || inputs.region == 'de')
+  southeastasia:
+    needs: westus
+    if: always() && github.ref == 'refs/heads/main' && (inputs.region == 'all' || inputs.region == 'sea')
     uses: ./.github/workflows/restore-region.yml
     with:
-      region: de
-      environment: prod-rollback-de
+      region: sea
+      environment: prod-rollback-sea
       source_run_id: ${{ inputs.source_run_id }}
   korea:
-    needs: germany
+    needs: southeastasia
     if: always() && github.ref == 'refs/heads/main' && (inputs.region == 'all' || inputs.region == 'kr')
     uses: ./.github/workflows/restore-region.yml
     with:

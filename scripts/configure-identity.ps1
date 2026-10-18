@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')][string]$Repository,
-    [Parameter(Mandatory)][ValidateSet('build','prod-kr','prod-de','prod-br','prod-rollback-kr','prod-rollback-de','prod-rollback-br')][string]$Environment,
+    [Parameter(Mandatory)][ValidateSet('build','prod-kr','prod-sea','prod-usw','prod-rollback-kr','prod-rollback-sea','prod-rollback-usw')][string]$Environment,
     [Parameter(Mandatory)][string]$SubscriptionId,
     [Parameter(Mandatory)][string]$ClaimsFile,
     [string]$AcrName,

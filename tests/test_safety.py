@@ -398,7 +398,7 @@ class SafetyTests(unittest.TestCase):
             self.assertIn("group: safe-aca-production", text)
             self.assertIn("cancel-in-progress: false", text)
         self.assertIn("needs: korea", release)
-        self.assertIn("needs: germany", release)
+        self.assertIn("needs: southeastasia", release)
         self.assertNotIn("matrix:", release)
 
     def test_business_function(self):

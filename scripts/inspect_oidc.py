@@ -37,8 +37,8 @@ def main():
     require(claims["repository"] == os.environ["GITHUB_REPOSITORY"], "Unexpected repository")
     require(claims["ref"] == "refs/heads/main", "Inspect only protected main")
     environment = os.environ["INSPECT_ENVIRONMENT"]
-    require(environment in {"build", "prod-kr", "prod-de", "prod-br",
-                            "prod-rollback-kr", "prod-rollback-de", "prod-rollback-br"},
+    require(environment in {"build", "prod-kr", "prod-sea", "prod-usw",
+                            "prod-rollback-kr", "prod-rollback-sea", "prod-rollback-usw"},
             "Unknown environment")
     claims["inspected_environment"] = environment
     save(Path("state") / f"claims-{environment}.json", claims)

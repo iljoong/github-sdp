@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import signal
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -39,7 +40,8 @@ def snapshot():
             "app_id": "/subscriptions/sub/resourceGroups/group/providers/Microsoft.App/containerApps/myapp",
             "stable": "myapp--old", "candidate": "myapp--r123", "image": "demoacr.azurecr.io/safe-demo@sha256:" + "b" * 64,
             "traffic": {"myapp--old": 100}, "stable_template": template(), "head_template": template(),
-            "stable_template_hash": common.digest(template()), "invariant": "invariant"}
+            "stable_template_hash": common.digest(template()), "invariant": "invariant",
+            "candidate_probes": common.load(ROOT / "infra" / "health-probes.json")}
 
 
 def row(revision, source, count=1000, errors=0, p95=40, failures=0):
@@ -214,6 +216,97 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(result["containers"][0]["image"], s["image"])
         self.assertEqual(result["containers"][0]["env"], [{"name": "RELEASE_ID", "value": "123"}])
         self.assertEqual(s["stable_template"], template())
+
+    def test_shared_http_probe_policy_has_explicit_valid_timeouts_and_thresholds(self):
+        probes = common.load(ROOT / "infra" / "health-probes.json")
+        self.assertEqual([p["type"] for p in probes], ["Startup", "Readiness", "Liveness"])
+        for probe in probes:
+            self.assertEqual(probe["httpGet"], {"path": "/healthz", "port": 8080, "scheme": "HTTP"})
+            self.assertEqual(probe["timeoutSeconds"], 5)
+            self.assertGreaterEqual(probe["initialDelaySeconds"], 1)
+            self.assertLessEqual(probe["initialDelaySeconds"], 60)
+            self.assertGreaterEqual(probe["periodSeconds"], probe["timeoutSeconds"])
+            self.assertLessEqual(probe["periodSeconds"], 240)
+            self.assertGreaterEqual(probe["failureThreshold"], 1)
+            self.assertLessEqual(probe["failureThreshold"], 10)
+            self.assertEqual(probe["successThreshold"], 1)
+        startup, readiness, liveness = probes
+        self.assertEqual(startup["periodSeconds"] * startup["failureThreshold"], 150)
+        self.assertEqual((readiness["periodSeconds"], readiness["failureThreshold"]), (5, 3))
+        self.assertEqual((liveness["periodSeconds"], liveness["failureThreshold"]), (10, 3))
+        self.assertIn("probes: loadJsonContent('./health-probes.json')",
+                      (ROOT / "infra" / "region.bicep").read_text())
+
+    def test_candidate_probe_override_preserves_stable_and_legacy_recovery_templates(self):
+        s = snapshot()
+        old_probes = json.loads(json.dumps(s["candidate_probes"]))
+        for probe in old_probes:
+            probe["timeoutSeconds"] = 2
+        s["stable_template"]["containers"][0]["probes"] = old_probes
+        before = json.loads(json.dumps(s))
+        candidate = common.expected_candidate(s)
+        self.assertEqual(candidate["containers"][0]["probes"], s["candidate_probes"])
+        self.assertEqual(s, before)
+        candidate["containers"][0]["probes"][0]["timeoutSeconds"] = 9
+        self.assertEqual(s, before)
+        del s["candidate_probes"]
+        legacy = common.expected_candidate(s)
+        self.assertEqual(legacy["containers"][0]["probes"], old_probes)
+        self.assertEqual(legacy["containers"][0]["image"], s["image"])
+
+    def test_candidate_probe_policy_is_frozen_and_drift_is_rejected(self):
+        s = snapshot()
+        candidate = common.expected_candidate(s)
+        with patch.object(common, "revision", return_value={
+                "name": s["candidate"], "properties": {"template": candidate}}):
+            common.candidate_owned(s)
+            for probe in candidate["containers"][0]["probes"]:
+                with self.subTest(probe=probe["type"]):
+                    probe["timeoutSeconds"] = 2
+                    with self.assertRaisesRegex(RuntimeError, "Candidate template drift"):
+                        common.candidate_owned(s)
+                    probe["timeoutSeconds"] = 5
+        changed = json.loads(json.dumps(s["candidate_probes"]))
+        changed[0]["timeoutSeconds"] = 8
+        with patch.object(common, "load", return_value=changed) as read_policy:
+            self.assertEqual(common.expected_candidate(s)["containers"][0]["probes"],
+                             s["candidate_probes"])
+            read_policy.assert_not_called()
+
+    def test_snapshot_freezes_candidate_probes_without_modifying_stable(self):
+        s = snapshot()
+        baseline = template()
+        baseline["containers"][0]["probes"] = [{"type": "Readiness", "timeoutSeconds": 2,
+                                               "httpGet": {"path": "/healthz", "port": 8080}}]
+        value = {"properties": {"configuration": {
+            "activeRevisionsMode": "Multiple",
+            "ingress": {"external": True, "transport": "auto",
+                        "traffic": [{"revisionName": s["stable"], "weight": 100}]}},
+            "template": baseline}}
+        release = {"repository": s["repository"], "run_id": s["run_id"],
+                   "commit": "source-sha", "image": s["image"]}
+        environment = {"GITHUB_RUN_ATTEMPT": "1", "GITHUB_RUN_ID": s["run_id"],
+                       "GITHUB_REPOSITORY": s["repository"], "GITHUB_SHA": "source-sha",
+                       "REGION": s["region"], "CONTAINER_APP": "myapp", "RESOURCE_GROUP": "group"}
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(os.environ, environment), \
+             patch.object(snapshot_script, "Path", side_effect=lambda name: (
+                 Path(directory) / name if name == "state" else Path(name))), \
+             patch.object(snapshot_script, "load", side_effect=lambda path: (
+                 release if path == "release.json" else common.load(path))), \
+             patch.object(snapshot_script, "app", return_value=value), \
+             patch.object(snapshot_script, "revision", return_value={"properties": {"template": baseline}}), \
+             patch.object(snapshot_script, "ready", return_value=True), \
+             patch.object(snapshot_script, "app_id", return_value=s["app_id"]), \
+             patch.object(snapshot_script, "invariant", return_value="invariant"), \
+             patch.object(snapshot_script, "az", return_value=[]), \
+             patch.object(snapshot_script, "save") as save, patch("builtins.print"):
+            snapshot_script.main()
+        captured = save.call_args.args[1]
+        self.assertEqual(captured["candidate_probes"], common.load(ROOT / "infra" / "health-probes.json"))
+        self.assertEqual(captured["stable_template"], baseline)
+        self.assertEqual(captured["stable_template_hash"], common.digest(baseline))
+        self.assertEqual(baseline["containers"][0]["probes"][0]["timeoutSeconds"], 2)
 
     def test_gate_uses_real_business_metrics(self):
         result = metrics.gate(rows(), snapshot(), "production", 10)
@@ -589,7 +682,7 @@ class SafetyTests(unittest.TestCase):
         with patch.dict(os.environ, {"GITHUB_RUN_ATTEMPT": "1", "GITHUB_RUN_ID": "123", "REGION": "kr"}), \
              patch.object(rollout, "verify_context"), patch.object(rollout, "guarded_state"), \
              patch.object(rollout, "baseline_preflight") as preflight, \
-             patch.object(rollout, "cli_app", return_value=[]), patch.object(rollout, "save"), \
+             patch.object(rollout, "cli_app", return_value=[]), patch.object(rollout, "save") as save, \
              patch.object(rollout, "candidate_owned"), patch.object(rollout, "ready", return_value=True), \
              patch.object(rollout, "wait_ready"), patch.object(rollout, "bake", return_value={"p95": 40}), \
              patch.object(rollout, "az", side_effect=[[], {}]) as cli, \
@@ -601,9 +694,15 @@ class SafetyTests(unittest.TestCase):
                               {"myapp--old": 50, "myapp--r123": 50},
                               {"myapp--old": 0, "myapp--r123": 100}])
             copy_command = cli.call_args.args
-            self.assertIn("--from-revision", copy_command)
-            self.assertEqual(copy_command[copy_command.index("--from-revision") + 1], "myapp--old")
-            self.assertEqual(copy_command[copy_command.index("--image") + 1], snapshot()["image"])
+            self.assertEqual(copy_command[:2], ("containerapp", "update"))
+            self.assertIn("--yaml", copy_command)
+            self.assertNotIn("--from-revision", copy_command)
+            self.assertNotIn("--image", copy_command)
+            payloads = [call.args[1] for call in save.call_args_list
+                        if Path(call.args[0]).name == "candidate.json"]
+            self.assertEqual(payloads, [{"properties": {"template": common.expected_candidate(snapshot())}}])
+            self.assertEqual(payloads[0]["properties"]["template"]["containers"][0]["probes"],
+                             snapshot()["candidate_probes"])
             self.assertNotIn("latest", copy_command)
 
     def test_existing_candidate_is_not_blindly_replayed(self):
@@ -615,6 +714,39 @@ class SafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "not safely replayable"):
                 rollout.deploy(snapshot(), "demo")
             traffic.assert_not_called()
+
+    def test_candidate_template_file_is_scoped_and_cleaned_up_on_update_failure(self):
+        s = snapshot()
+        before = json.loads(json.dumps(s))
+        files = []
+
+        def persist(path, value):
+            if Path(path).name == "candidate.json":
+                common.save(path, value)
+
+        def cli(*args):
+            if args[:3] == ("containerapp", "revision", "list"):
+                return []
+            self.assertEqual(args[:2], ("containerapp", "update"))
+            filename = Path(args[args.index("--yaml") + 1])
+            files.append(filename)
+            self.assertEqual(common.load(filename), {
+                "properties": {"template": common.expected_candidate(s)}})
+            self.assertNotIn("--from-revision", args)
+            raise RuntimeError("candidate update failed")
+
+        with patch.dict(os.environ, {"GITHUB_RUN_ATTEMPT": "1", "GITHUB_RUN_ID": "123", "REGION": "kr"}), \
+             patch.object(rollout, "verify_context"), patch.object(rollout, "guarded_state"), \
+             patch.object(rollout, "baseline_preflight"), patch.object(rollout, "cli_app", return_value=[]), \
+             patch.object(rollout, "save", side_effect=persist), patch.object(rollout, "az", side_effect=cli), \
+             patch.object(rollout.signal, "signal"), patch.object(rollout, "restore") as restore:
+            with self.assertRaisesRegex(RuntimeError, "candidate update failed"):
+                rollout.deploy(s, "production")
+            restore.assert_called_once_with(s, "automatic-rollback")
+        self.assertEqual(len(files), 1)
+        self.assertFalse(files[0].exists())
+        self.assertFalse(files[0].parent.exists())
+        self.assertEqual(s, before)
 
     def test_durable_baseline_upload_precedes_rollout(self):
         text = (ROOT / ".github" / "workflows" / "region.yml").read_text()
@@ -693,6 +825,35 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual([call.args[1] for call in request.call_args_list], ["/healthz", "/work"])
             self.assertEqual([call.args[2] for call in request.call_args_list], ["probe", "probe"])
             self.assertIn("not organic baseline SLO", save.call_args.args[1]["limitation"])
+
+    def test_health_endpoint_remains_responsive_during_slow_business_request(self):
+        work_started = threading.Event()
+
+        class ObservedHandler(server.Handler):
+            def do_GET(self):
+                if self.path == "/work":
+                    work_started.set()
+                super().do_GET()
+
+        with patch.dict(os.environ, {"DEMO_LATENCY_MS": "2500", "DEMO_FAILURE_PERCENT": "0"}), \
+             patch("builtins.print"), ThreadingHTTPServer(("127.0.0.1", 0), ObservedHandler) as httpd:
+            thread = threading.Thread(target=httpd.serve_forever)
+            thread.start()
+            endpoint = f"http://127.0.0.1:{httpd.server_port}"
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as client:
+                    work = client.submit(urllib.request.urlopen, f"{endpoint}/work", timeout=5)
+                    self.assertTrue(work_started.wait(2))
+                    started = time.monotonic()
+                    with urllib.request.urlopen(f"{endpoint}/healthz", timeout=1) as response:
+                        self.assertEqual(response.status, 200)
+                        self.assertTrue(json.load(response)["ready"])
+                    self.assertLess(time.monotonic() - started, 1)
+                    with work.result(timeout=5) as response:
+                        self.assertEqual(json.load(response)["result"], 42)
+            finally:
+                httpd.shutdown()
+                thread.join(2)
 
     def test_signal_enters_error_path(self):
         with self.assertRaisesRegex(RuntimeError, "rollback"):

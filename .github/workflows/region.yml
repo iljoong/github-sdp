@@ -46,7 +46,7 @@ jobs:
         run: |
           az version
           az extension show --name log-analytics >/dev/null 2>&1 || az extension add --name log-analytics --yes
-          az containerapp revision copy --help >/dev/null
+          az containerapp update --help >/dev/null
           az monitor log-analytics query --help >/dev/null
       - name: Capture exact stable state (read only)
         run: python scripts/snapshot.py

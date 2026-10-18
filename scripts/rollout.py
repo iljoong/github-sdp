@@ -3,6 +3,7 @@ import concurrent.futures
 import json
 import os
 import signal
+import tempfile
 import threading
 import time
 import urllib.request
@@ -11,7 +12,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import demo_load
-from common import (az, candidate_owned, cli_app, equal_traffic, guarded_state, iso, load,
+from common import (az, candidate_owned, cli_app, equal_traffic, expected_candidate, guarded_state, iso, load,
                     props, ready, require, revision, save, set_traffic, utcnow, verify_context)
 from metrics import (PROFILES, TELEMETRY_RETRY_SECONDS, TELEMETRY_RETRY_TIMEOUT,
                      IncompleteTelemetry, gate, metric, query)
@@ -231,12 +232,11 @@ def deploy(snapshot, profile):
     save(Path("evidence") / os.environ["REGION"] / "mutation-intent.json",
          {"at": iso(utcnow()), "candidate": snapshot["candidate"]})
     try:
-        # Before copy, baseline has explicit stable=100, NEVER latest=100.
-        # Copy inherits this app-scoped traffic: the new revision starts at 0%.
-        az("containerapp", "revision", "copy", *cli_app(),
-           "--from-revision", snapshot["stable"], "--container-name", "web",
-           "--image", snapshot["image"], "--revision-suffix", f'r{snapshot["run_id"]}',
-           "--set-env-vars", f'RELEASE_ID={snapshot["run_id"]}')
+        # Patch only the stable-derived template; preserve explicit stable=100 routing.
+        with tempfile.TemporaryDirectory(prefix="safe-candidate-") as directory:
+            filename = Path(directory) / "candidate.json"
+            save(filename, {"properties": {"template": expected_candidate(snapshot)}})
+            az("containerapp", "update", *cli_app(), "--yaml", str(filename))
         guarded_state(snapshot, {snapshot["stable"]: 100})
         wait_ready(snapshot)
         reference = None

@@ -102,38 +102,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
             cpu: json('0.25')
             memory: '0.5Gi'
           }
-          probes: [
-            {
-              type: 'Startup'
-              httpGet: {
-                path: '/healthz'
-                port: 8080
-              }
-              periodSeconds: 5
-              failureThreshold: 30
-              timeoutSeconds: 2
-            }
-            {
-              type: 'Readiness'
-              httpGet: {
-                path: '/healthz'
-                port: 8080
-              }
-              periodSeconds: 5
-              failureThreshold: 3
-              timeoutSeconds: 2
-            }
-            {
-              type: 'Liveness'
-              httpGet: {
-                path: '/healthz'
-                port: 8080
-              }
-              periodSeconds: 10
-              failureThreshold: 3
-              timeoutSeconds: 2
-            }
-          ]
+          probes: loadJsonContent('./health-probes.json')
         }
       ]
       scale: {

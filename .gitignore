@@ -6,5 +6,6 @@ release.json
 restore-input/
 infra/*.json
 !infra/*parameters.json
+!infra/health-probes.json
 
 _*

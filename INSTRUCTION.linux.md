@@ -203,6 +203,46 @@ helper가 중단합니다. 누락된 role assignment나 variable을 복구할 �
 
 ## 5. 릴리스 및 복구 workflow
 
+### ACA health probes
+
+[공식 문서](https://learn.microsoft.com/en-us/azure/container-apps/health-probes)에
+따라 Startup, Readiness, Liveness를 HTTP `GET /healthz` (port 8080)로 명시합니다.
+공유 정책은 [`infra/health-probes.json`](infra/health-probes.json)입니다. `/healthz`는
+`/work`의 지연/실패 주입이나 business telemetry와 분리됩니다. 현재 외부 의존성이
+없는 예제에서는 같은 endpoint를 사용하며, 의존성이 추가되면 readiness와 liveness를
+분리해야 합니다.
+
+| 종류 | Initial delay | Period | Timeout | Failure / success threshold |
+| --- | --- | --- | --- | --- |
+| Startup | 3초 | 15초 | 5초 | 10 / 1 |
+| Readiness | 3초 | 5초 | 5초 | 3 / 1 |
+| Liveness | 10초 | 10초 | 5초 | 3 / 1 |
+
+2초 timeout을 5초로 늘립니다. Startup의 주기 × 실패 횟수는 기존처럼 약 150초이며
+정확한 wall-clock 기한은 아닙니다. Readiness는 트래픽 수신 가능 여부를,
+Liveness는 재시작 필요 여부를 판단합니다. 기존 business/SLO gate는 유지합니다.
+
+신규 bootstrap은 Bicep이 같은 JSON 정책을 읽습니다. **기존 앱은 새 release
+workflow로 적용**하세요. snapshot에 `candidate_probes`를 고정하고 stable snapshot을
+복제한 candidate template에만 적용합니다. `az containerapp update --yaml`은
+template-only PATCH를 보내므로 traffic/app-scoped 설정과 stable/LKG revision을
+수정하지 않습니다. 후보는 0%에서 readiness/business 확인 후 기존 10/50/100% gate로
+승격합니다. 예전 snapshot에 정책 필드가 없으면 원래 probe를 유지하여 과거 복구
+artifact와의 호환성을 보존합니다.
+
+**라이브 앱에 bootstrap Bicep을 다시 배포하지 마세요.** 기존 stable의 probe 설정은
+바뀌지 않으므로 그 revision에는 2초 timeout 로그가 계속 나타날 수 있습니다.
+로그 한 줄로 원인을 확정할 수 없으며 이 변경은 CPU 부족이나 hang을 해결하지
+않습니다. 계속 실패하면 해당 revision/replica의 CPU·메모리, restart 및 startup 시간을
+조사하세요. 실제 revision 설정을 read-only로 확인할 수 있습니다.
+
+```bash
+az containerapp revision show --resource-group <resource-group> --name <app-name> \
+  --revision <revision-name> --query 'properties.template.containers[0].probes' -o json
+```
+
+### Demo load와 복구
+
 Demo 부하는 shared app endpoint에 초당 10건을 목표로 독립적으로 전송하므로
 Azure 조회 및 telemetry 대기 중에도 계속 실행됩니다. worker 최대 16개와
 실행/대기 요청 합계 최대 32개로 제한합니다. 포화 시 제출을 멈추고 여유가 생기면

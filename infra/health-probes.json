@@ -1,0 +1,41 @@
+[
+  {
+    "type": "Startup",
+    "httpGet": {
+      "path": "/healthz",
+      "port": 8080,
+      "scheme": "HTTP"
+    },
+    "initialDelaySeconds": 3,
+    "periodSeconds": 15,
+    "timeoutSeconds": 5,
+    "failureThreshold": 10,
+    "successThreshold": 1
+  },
+  {
+    "type": "Readiness",
+    "httpGet": {
+      "path": "/healthz",
+      "port": 8080,
+      "scheme": "HTTP"
+    },
+    "initialDelaySeconds": 3,
+    "periodSeconds": 5,
+    "timeoutSeconds": 5,
+    "failureThreshold": 3,
+    "successThreshold": 1
+  },
+  {
+    "type": "Liveness",
+    "httpGet": {
+      "path": "/healthz",
+      "port": 8080,
+      "scheme": "HTTP"
+    },
+    "initialDelaySeconds": 10,
+    "periodSeconds": 10,
+    "timeoutSeconds": 5,
+    "failureThreshold": 3,
+    "successThreshold": 1
+  }
+]

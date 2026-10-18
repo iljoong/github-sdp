@@ -187,6 +187,9 @@ def expected_candidate(snapshot):
     env = [v for v in container.get("env", []) if v["name"] != "RELEASE_ID"]
     env.append({"name": "RELEASE_ID", "value": snapshot["run_id"]})
     container["env"] = env
+    # Older recovery artifacts predate the explicit candidate probe policy.
+    if "candidate_probes" in snapshot:
+        container["probes"] = snapshot["candidate_probes"]
     return normalized_template(template)
 
 

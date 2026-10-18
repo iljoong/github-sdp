@@ -275,6 +275,47 @@ workspace의 customer GUID입니다.
 
 ## 6. 배포 실행
 
+### ACA health probe와 기존 앱 적용
+
+[공식 health probe 문서](https://learn.microsoft.com/en-us/azure/container-apps/health-probes)에
+따라 Startup, Readiness, Liveness를 모두 HTTP `GET /healthz` (port 8080)로 설정합니다.
+`/healthz`는 지연/실패 주입이 있는 `/work`와 분리된 경량 endpoint이며 business
+telemetry에 포함하지 않습니다. 현재 외부 의존성이 없는 예제이므로 세 종류가 같은
+endpoint를 사용합니다. 의존성이 추가되면 readiness와 liveness의 의미를 분리하세요.
+
+공유 정책은 [`infra/health-probes.json`](infra/health-probes.json)입니다.
+
+| 종류 | Initial delay | Period | Timeout | Failure / success threshold |
+| --- | --- | --- | --- | --- |
+| Startup | 3초 | 15초 | 5초 | 10 / 1 |
+| Readiness | 3초 | 5초 | 5초 | 3 / 1 |
+| Liveness | 10초 | 10초 | 5초 | 3 / 1 |
+
+기존 2초 timeout을 5초로 늘려 짧은 응답 지연에 여유를 줍니다. Startup은 주기 × 실패
+횟수 약 150초의 기존 허용 범위를 유지합니다. 이는 정확한 wall-clock 기한이 아닙니다.
+Readiness는 트래픽 수신 가능 여부, Liveness는 재시작 필요 여부를 판단하며,
+probe 성공만으로 business/SLO gate를 통과하지 않습니다.
+
+- 신규 bootstrap은 Bicep이 공유 정책을 읽습니다.
+- 기존 앱은 **새 release workflow**로 적용합니다. snapshot에 `candidate_probes`를
+  고정하고, stable snapshot을 복제한 전체 candidate template에만 정책을 적용합니다.
+  `az containerapp update --yaml`의 template-only PATCH를 사용하며 traffic,
+  app-scoped configuration, stable/LKG revision은 변경하지 않습니다. 후보는 0%로
+  생성한 뒤 readiness/business 확인과 기존 10/50/100% gate를 통과해야 합니다.
+- 예전 snapshot에 `candidate_probes`가 없으면 기존 stable-derived probe를 그대로
+  사용하므로 과거 artifact의 restore/ownership 의미가 바뀌지 않습니다.
+- **라이브 앱에 bootstrap Bicep을 재적용하거나 현재 stable revision을 수정하지 마세요.**
+
+`ProbeFailed ... timeout in 2 seconds`만으로 원인을 확정할 수는 없습니다.
+새 정책은 새 candidate에만 적용되므로 기존 stable의 로그에는 2초 timeout이 남을 수
+있습니다. 계속 실패하면 revision/replica별 CPU·메모리, restart, startup 시간과 probe
+설정을 조사하세요. 이 변경은 CPU 부족이나 app hang 자체를 해결하지 않습니다.
+현재 활성 revision의 설정은 다음 read-only 명령으로 확인할 수 있습니다.
+
+```powershell
+az containerapp revision show --resource-group <resource-group> --name <app-name> --revision <revision-name> --query properties.template.containers[0].probes -o json
+```
+
 ### Demo 프로필
 
 전체 파이프라인 연결을 빠르게 확인하는 교육용 프로필입니다. `/work`에 대략

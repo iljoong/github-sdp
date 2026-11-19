@@ -1,0 +1,259 @@
+<!doctype html>
+<!--
+  PROTOTYPE — throwaway. 루트(/) 소개 페이지 UI 후보 3종을 ?variant=A|B|C 로 전환해 비교한다.
+  질문: "데모 앱 루트에 README 같은 설명 + endpoint 목록을 어떤 모양으로 보여줄까?"
+  실행: python app/server.py  →  http://localhost:8080/?variant=A  (←/→ 키 또는 하단 바로 전환)
+  선택이 끝나면 승자만 정식 구현으로 다시 작성하고, 이 파일과 /  라우트는 main에 들어가지 않는다.
+-->
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zero-downtime demo app</title>
+<style>
+  :root { --bg:#0f172a; --panel:#1e293b; --line:#334155; --text:#e2e8f0; --muted:#94a3b8;
+          --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444; --acc:#3b82f6; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 system-ui,"Segoe UI","Malgun Gothic",sans-serif; background:var(--bg); color:var(--text); }
+  a { color:#93c5fd; }
+  code, pre { font-family:ui-monospace,Consolas,monospace; font-size:12.5px; }
+  .m { display:inline-block; min-width:58px; text-align:center; padding:1px 6px; border-radius:4px; font-size:11px; font-weight:700; color:#0f172a; }
+  .m.GET { background:#60a5fa; } .m.POST { background:#f59e0b; } .m.OPTIONS { background:#94a3b8; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--muted); margin-right:6px; }
+  .dot.SERVING { background:var(--ok); } .dot.DRAINING { background:var(--warn); } .dot.ERR { background:var(--bad); }
+  .muted { color:var(--muted); }
+  button { background:var(--acc); color:#fff; border:0; border-radius:6px; padding:6px 12px; font:inherit; cursor:pointer; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--text); }
+  [data-variant] { display:none; }
+
+  /* ---------- A: 문서형 (README 한 장) ---------- */
+  #A { max-width:920px; margin:0 auto; padding:32px 24px 90px; }
+  #A header { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; border-bottom:1px solid var(--line); padding-bottom:16px; }
+  #A h1 { margin:0; font-size:26px; }
+  #A .pill { background:var(--panel); border:1px solid var(--line); border-radius:999px; padding:4px 12px; white-space:nowrap; }
+  #A h2 { font-size:17px; margin:28px 0 8px; }
+  #A table { width:100%; border-collapse:collapse; }
+  #A th, #A td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  #A th { color:var(--muted); font-weight:500; font-size:12px; }
+  #A td.path code { color:#fff; }
+  #A pre { background:var(--panel); padding:12px; border-radius:8px; overflow:auto; }
+
+  /* ---------- B: API 콘솔형 (사이드바 + Try it) ---------- */
+  #B { height:100vh; grid-template-columns:300px 1fr; }
+  #B aside { background:#0b1222; border-right:1px solid var(--line); overflow:auto; padding:16px 0 80px; }
+  #B aside .brand { padding:0 16px 12px; border-bottom:1px solid var(--line); margin-bottom:8px; }
+  #B aside .brand b { font-size:15px; }
+  #B aside h4 { margin:14px 16px 4px; font-size:11px; letter-spacing:.08em; color:var(--muted); text-transform:uppercase; }
+  #B aside .item { display:flex; gap:8px; align-items:center; padding:6px 16px; cursor:pointer; }
+  #B aside .item:hover { background:var(--panel); }
+  #B aside .item.on { background:var(--panel); box-shadow:inset 3px 0 var(--acc); }
+  #B main { overflow:auto; padding:28px 32px 90px; }
+  #B .head { display:flex; align-items:center; gap:10px; font-size:20px; }
+  #B .sec { margin-top:20px; }
+  #B .sec h3 { font-size:13px; color:var(--muted); margin:0 0 6px; font-weight:500; }
+  #B pre { background:var(--panel); padding:12px; border-radius:8px; overflow:auto; margin:0; min-height:44px; }
+  #B .resmeta { margin-bottom:6px; font-size:12px; }
+  #B .intro { max-width:720px; }
+
+  /* ---------- C: 대시보드형 (상태 우선 + 역할별 카드) ---------- */
+  #C { padding:24px 24px 90px; max-width:1200px; margin:0 auto; }
+  #C .hero { display:grid; grid-template-columns:2fr 1fr 1fr 1fr; gap:12px; }
+  #C .tile { background:var(--panel); border-radius:12px; padding:16px; }
+  #C .tile .k { color:var(--muted); font-size:12px; }
+  #C .tile .v { font-size:22px; font-weight:700; word-break:break-all; }
+  #C .tile.big .v { font-size:44px; }
+  #C .actions { display:flex; gap:10px; margin:16px 0 8px; flex-wrap:wrap; }
+  #C .lede { color:var(--muted); max-width:900px; }
+  #C .cols { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; margin-top:20px; }
+  #C .col h3 { margin:0 0 2px; font-size:15px; } #C .col .who { color:var(--muted); font-size:12px; margin-bottom:10px; }
+  #C .ep { background:var(--panel); border-radius:10px; padding:10px 12px; margin-bottom:10px; border-left:4px solid var(--line); }
+  #C .ep .row { display:flex; gap:8px; align-items:center; justify-content:space-between; }
+  #C .ep .d { color:var(--muted); font-size:12.5px; margin-top:4px; }
+  #C .ep .copy { background:transparent; border:0; color:var(--muted); padding:0; font-size:12px; }
+  #C .ep .copy:hover { color:var(--text); }
+  @media (max-width:900px) { #C .hero, #C .cols { grid-template-columns:1fr; } #B { grid-template-columns:1fr; } #B aside { display:none; } }
+
+  /* ---------- prototype switcher (not part of the design) ---------- */
+  #proto { position:fixed; left:50%; bottom:16px; transform:translateX(-50%); display:flex; align-items:center; gap:10px;
+           background:#fde047; color:#111; border-radius:999px; padding:6px 10px; box-shadow:0 6px 24px rgba(0,0,0,.5);
+           font:600 13px system-ui,sans-serif; z-index:99; }
+  #proto button { background:#111; color:#fde047; border-radius:999px; width:28px; height:28px; padding:0; }
+</style>
+</head>
+<body>
+
+<!-- ======================= A: 문서형 ======================= -->
+<div id="A" data-variant="A">
+  <header>
+    <div>
+      <h1>Zero-downtime demo app</h1>
+      <div class="muted">SDP 배포 파이프라인 교육용 샘플 · Python 표준 라이브러리만 사용</div>
+    </div>
+    <div class="pill"><span class="dot" data-bind="dot"></span><b data-bind="version">—</b> · <span data-bind="state">—</span></div>
+  </header>
+
+  <h2>이 앱은 무엇인가요?</h2>
+  <p>Azure Container Apps에 KR → SEA → USW 순서로 canary 배포되는 데모 서비스입니다.
+     readiness/liveness 프로브, <code>SIGTERM</code> 수신 시 drain(진행 중 요청 완료 후 종료),
+     긴 작업(long task)을 제공해 <b>배포 중에도 요청이 끊기지 않는지</b> 눈으로 확인할 수 있습니다.</p>
+  <ul>
+    <li><b>무중단 확인</b> — <a href="/verify">/verify</a> 페이지가 1초마다 <code>/api/version</code>을 호출해 버전 전환과 오류 0건을 보여줍니다.</li>
+    <li><b>Graceful shutdown</b> — SIGTERM → <code>/readyz</code> 503 → 진행 중 작업 완료 → 종료 (grace <span data-bind="grace">—</span>s).</li>
+    <li><b>SDP health gate</b> — <code>/work</code> 호출마다 <code>kind: business</code> 로그를 남겨 파이프라인이 성공률을 판정합니다.</li>
+  </ul>
+
+  <h2>Endpoints</h2>
+  <table id="A-table"><thead><tr><th>Method</th><th>Path</th><th>설명</th><th>사용 주체</th></tr></thead><tbody></tbody></table>
+
+  <h2>빠른 시작</h2>
+<pre># 로컬 실행
+python app/server.py
+# 버전 확인
+curl -s http://localhost:8080/api/version
+# 긴 작업 (drain 중에도 완료되는지 확인)
+curl -s -X POST http://localhost:8080/api/long-task</pre>
+  <p class="muted">현재 revision <code data-bind="revision">—</code> · replica <code data-bind="replica">—</code> · release <code data-bind="release">—</code></p>
+</div>
+
+<!-- ======================= B: API 콘솔형 ======================= -->
+<div id="B" data-variant="B">
+  <aside>
+    <div class="brand"><b>Zero-downtime demo</b><br>
+      <span class="muted"><span class="dot" data-bind="dot"></span><span data-bind="version">—</span> · <span data-bind="state">—</span></span></div>
+    <div class="item" data-ep="__intro"><span class="m" style="background:#e2e8f0">ℹ</span> 소개</div>
+    <div id="B-nav"></div>
+  </aside>
+  <main id="B-main"></main>
+</div>
+
+<!-- ======================= C: 대시보드형 ======================= -->
+<div id="C" data-variant="C">
+  <div class="hero">
+    <div class="tile big"><div class="k">VERSION</div><div class="v" data-bind="version">—</div>
+      <div class="muted">release <span data-bind="release">—</span></div></div>
+    <div class="tile"><div class="k">STATE</div><div class="v"><span class="dot" data-bind="dot"></span><span data-bind="state">—</span></div>
+      <div class="muted">in-flight <span data-bind="inflight">0</span></div></div>
+    <div class="tile"><div class="k">REVISION</div><div class="v" style="font-size:15px" data-bind="revision">—</div></div>
+    <div class="tile"><div class="k">REPLICA</div><div class="v" style="font-size:15px" data-bind="replica">—</div>
+      <div class="muted">grace <span data-bind="grace">—</span>s</div></div>
+  </div>
+  <div class="actions">
+    <a href="/verify"><button>▶ 무중단 검증 페이지 열기</button></a>
+    <button class="ghost" onclick="alert('PROTOTYPE: 정식 구현에서 POST /api/long-task 호출')">긴 작업 시작 (stub)</button>
+  </div>
+  <p class="lede">SDP 파이프라인 교육용 데모 서비스입니다. 배포 중에도 요청이 끊기지 않도록 readiness/liveness 프로브와
+     SIGTERM drain을 구현했고, 파이프라인은 <code>/work</code> 로그로 canary 단계를 판정합니다. 아래는 누가 어떤 endpoint를 쓰는지입니다.</p>
+  <div class="cols" id="C-cols"></div>
+</div>
+
+<div id="proto"><button id="prev">←</button><span id="label"></span><button id="next">→</button></div>
+
+<script>
+// ---------- 공통 데이터 (정식 구현 시 server.py 쪽 목록과 단일 소스로 맞출 것) ----------
+const ENDPOINTS = [
+  { m:"GET",  p:"/",               who:"user",     t:"소개 페이지",       d:"이 화면. 앱 설명, 현재 버전/상태, endpoint 목록." },
+  { m:"GET",  p:"/verify",         who:"user",     t:"무중단 검증 화면",   d:"1초마다 /api/version 호출, revision별 /status 카드, 긴 작업 버튼." },
+  { m:"GET",  p:"/api/version",    who:"user",     t:"버전 정보",         d:"APP_VERSION, release, revision, replica, DNS suffix, 시각." },
+  { m:"POST", p:"/api/long-task",  who:"user",     t:"긴 작업",           d:"LONG_TASK_SECONDS 동안 실행. drain 중에도 완료되며 drainObserved로 확인. 초과 시 429, drain 중 새 요청 503.", mut:true },
+  { m:"GET",  p:"/healthz",        who:"platform", t:"Liveness probe",    d:"프로세스가 HTTP를 처리하면 항상 200. 실패 시 컨테이너 재시작." },
+  { m:"GET",  p:"/readyz",         who:"platform", t:"Readiness probe",   d:"SERVING이면 200, DRAINING이면 503 → 새 트래픽 라우팅 중단." },
+  { m:"GET",  p:"/status",         who:"platform", t:"Drain 상태",        d:"state, in-flight 작업, grace 남은 시간. /verify 카드가 사용." },
+  { m:"GET",  p:"/work",           who:"pipeline", t:"Business 계약",     d:"응답마다 kind: business 로그 → SDP health gate가 성공률 판정. X-Safe-Source 헤더로 트래픽 분류." },
+  { m:"OPTIONS", p:"/api/*, /status", who:"pipeline", t:"CORS preflight", d:"/verify가 revision FQDN을 직접 호출할 수 있도록 허용.", noTry:true },
+];
+const WHO = { user:["데모 사용자","브라우저/curl로 직접 호출"], platform:["플랫폼 (ACA)","프로브·drain 관찰"], pipeline:["SDP 파이프라인","health gate·자동화"] };
+const live = {};
+
+function bind() {
+  const map = { version:live.version, state:live.state, revision:live.revision, replica:live.replica,
+                release:live.release, grace:live.graceSeconds, inflight:(live.inflight||[]).length };
+  document.querySelectorAll("[data-bind]").forEach(el => {
+    const k = el.dataset.bind;
+    if (k === "dot") el.className = "dot " + (live.err ? "ERR" : live.state || "");
+    else el.textContent = map[k] ?? "—";
+  });
+}
+async function poll() {
+  try {
+    const [v, s] = await Promise.all([fetch("/api/version").then(r => r.json()), fetch("/status").then(r => r.json())]);
+    Object.assign(live, v, s, { err:false });
+  } catch { live.err = true; live.state = "UNREACHABLE"; }
+  bind();
+}
+const curl = e => e.m === "POST" ? `curl -s -X POST ${location.origin}${e.p}` : `curl -s ${location.origin}${e.p}`;
+
+// ---------- A ----------
+document.querySelector("#A-table tbody").innerHTML = ENDPOINTS.map(e =>
+  `<tr><td><span class="m ${e.m}">${e.m}</span></td><td class="path"><code>${e.noTry ? e.p : `<a href="${e.p}">${e.p}</a>`}</code></td>
+   <td><b>${e.t}</b><br><span class="muted">${e.d}</span></td><td class="muted">${WHO[e.who][0]}</td></tr>`).join("");
+
+// ---------- B ----------
+document.getElementById("B-nav").innerHTML = Object.keys(WHO).map(w =>
+  `<h4>${WHO[w][0]}</h4>` + ENDPOINTS.filter(e => e.who === w).map(e =>
+    `<div class="item" data-ep="${e.p}"><span class="m ${e.m}">${e.m}</span><code>${e.p}</code></div>`).join("")).join("");
+function showB(key) {
+  document.querySelectorAll("#B .item").forEach(i => i.classList.toggle("on", i.dataset.ep === key));
+  const main = document.getElementById("B-main");
+  if (key === "__intro") {
+    main.innerHTML = `<div class="intro"><h2 style="margin-top:0">Zero-downtime demo app</h2>
+      <p>SDP 배포 파이프라인 교육용 샘플입니다. Azure Container Apps에 canary로 배포되며, readiness/liveness 프로브와
+      SIGTERM drain으로 배포 중에도 요청이 끊기지 않도록 설계했습니다.</p>
+      <p>왼쪽에서 endpoint를 고르면 설명과 curl 예시가 나오고, <b>Try it</b>으로 이 서버에 바로 호출해 응답을 볼 수 있습니다.</p>
+      <p><a href="/verify">/verify</a>에서 배포 중 버전 전환을 실시간으로 확인하세요.</p></div>`;
+    return;
+  }
+  const e = ENDPOINTS.find(x => x.p === key);
+  main.innerHTML = `<div class="head"><span class="m ${e.m}">${e.m}</span><code>${e.p}</code></div>
+    <div class="muted" style="margin-top:4px">${e.t} · ${WHO[e.who][0]}</div>
+    <div class="sec"><h3>설명</h3>${e.d}</div>
+    <div class="sec"><h3>curl</h3><pre>${curl(e)}</pre></div>
+    <div class="sec"><h3>응답</h3>
+      ${e.noTry ? `<span class="muted">브라우저가 자동으로 보내는 요청입니다.</span>` :
+        e.mut ? `<button onclick="alert('PROTOTYPE: 정식 구현에서 실제 POST 호출 + 진행률 표시')">Try it (stub)</button>` :
+        `<button id="try">Try it</button>`}
+      <div class="resmeta muted" id="resmeta" style="margin-top:10px"></div><pre id="res"></pre></div>`;
+  const btn = document.getElementById("try");
+  if (btn) btn.onclick = async () => {
+    const t0 = performance.now();
+    try { const r = await fetch(e.p);
+      document.getElementById("resmeta").textContent = `HTTP ${r.status} · ${Math.round(performance.now() - t0)} ms`;
+      document.getElementById("res").textContent = JSON.stringify(await r.json(), null, 2);
+    } catch (err) { document.getElementById("res").textContent = String(err); }
+  };
+}
+document.querySelectorAll("#B .item").forEach(i => i.onclick = () => showB(i.dataset.ep));
+document.getElementById("B-nav").querySelectorAll(".item").forEach(i => i.onclick = () => showB(i.dataset.ep));
+showB("__intro");
+
+// ---------- C ----------
+document.getElementById("C-cols").innerHTML = Object.keys(WHO).map(w =>
+  `<div class="col"><h3>${WHO[w][0]}</h3><div class="who">${WHO[w][1]}</div>` +
+  ENDPOINTS.filter(e => e.who === w).map(e =>
+    `<div class="ep" style="border-left-color:var(--${e.m === "POST" ? "warn" : "acc"})"><div class="row">
+       <span><span class="m ${e.m}">${e.m}</span> <code>${e.p}</code></span>
+       ${e.noTry ? "" : `<button class="copy" data-c="${curl(e)}">⧉ curl</button>`}</div>
+     <div><b>${e.t}</b></div><div class="d">${e.d}</div></div>`).join("") + `</div>`).join("");
+document.querySelectorAll("#C .copy").forEach(b => b.onclick = () => { navigator.clipboard?.writeText(b.dataset.c); b.textContent = "✓ 복사됨"; });
+
+// ---------- prototype switcher ----------
+const VARIANTS = [["A","문서형 README"],["B","API 콘솔 + Try it"],["C","상태 대시보드 + 역할별"]];
+function show(key) {
+  const i = Math.max(0, VARIANTS.findIndex(v => v[0] === key));
+  document.querySelectorAll("[data-variant]").forEach(el => el.style.display = el.dataset.variant === VARIANTS[i][0] ? (el.id === "B" ? "grid" : "block") : "none");
+  document.getElementById("label").textContent = `${VARIANTS[i][0]} (${VARIANTS[i][1]})`;
+  const u = new URL(location); u.searchParams.set("variant", VARIANTS[i][0]); history.replaceState(null, "", u);
+  return i;
+}
+let cur = show(new URLSearchParams(location.search).get("variant") || "A");
+const step = d => cur = show(VARIANTS[(cur + d + VARIANTS.length) % VARIANTS.length][0]);
+document.getElementById("prev").onclick = () => step(-1);
+document.getElementById("next").onclick = () => step(1);
+addEventListener("keydown", e => {
+  if (e.target.closest("input,textarea,[contenteditable]")) return;
+  if (e.key === "ArrowLeft") step(-1); if (e.key === "ArrowRight") step(1);
+});
+
+poll(); setInterval(poll, 2000);
+</script>
+</body>
+</html>

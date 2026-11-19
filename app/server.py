@@ -279,6 +279,10 @@ class Handler(BaseHTTPRequestHandler):
         started = time.monotonic()
         path = self.path.split("?", 1)[0]
         revision = os.environ.get("CONTAINER_APP_REVISION", "local")
+        if path == "/":  # PROTOTYPE route (prototype/home-page branch only)
+            self.send_body(200, (VERIFY_PAGE.parent / "prototype-home.html").read_bytes(),
+                           "text/html; charset=utf-8")
+            return
         if path == "/verify":
             if VERIFY_PAGE.is_file():
                 self.send_body(200, VERIFY_PAGE.read_bytes(), "text/html; charset=utf-8")

@@ -4,10 +4,14 @@
 
 ```text
 release.yml (workflow_dispatch, profile)
- ├─ build                     environment: build
+ ├─ build        → build.yml  environment: build      (version_prefix r)
  ├─ korea        → region.yml environment: prod-kr
  ├─ southeastasia→ region.yml environment: prod-sea   (korea 성공 시)
  └─ westus       → region.yml environment: prod-usw   (sea 성공 시)
+
+release-kr.yml (workflow_dispatch, profile=demo 기본) – 빠른 무중단 검증용
+ ├─ build        → build.yml  environment: build      (version_prefix k)
+ └─ korea        → region.yml environment: prod-kr
 
 restore.yml (workflow_dispatch, source_run_id, region)
  ├─ westus        → restore-region.yml environment: prod-rollback-usw
@@ -28,18 +32,40 @@ demo-retire.yml (workflow_dispatch, source_run_id, region) – 데모 전용
 | 동시성 | `safe-aca-production`, `cancel-in-progress: false` |
 | 브랜치 제한 | `github.ref == refs/heads/main` 에서만 build 실행 |
 
-**build job** (environment `build`, 30분 제한)
+**build job** → 재사용 workflow `build.yml` (environment `build`, 30분 제한).
+`release.yml` 과 `release-kr.yml` 이 같은 build를 씁니다.
 
 1. `run_attempt == 1` 확인 (재실행 거부)
 2. `python -m unittest discover -s tests -v`, `python -m compileall`
 3. `azure/login` (OIDC, SHA 고정 action)
-4. `docker build --platform linux/amd64 --build-arg APP_VERSION=r<run 번호>` → ACR push (`safe-demo:run-<run_id>`)
-   (`APP_VERSION` 은 `/verify` 화면의 버전 라벨, [5장](05-zero-downtime-demo.md))
+4. `docker build --platform linux/amd64 --build-arg APP_VERSION=<version_prefix><run 번호>` → ACR push (`safe-demo:run-<run_id>`)
+   (`APP_VERSION` 은 `/verify` 화면의 버전 라벨, [5장](05-zero-downtime-demo.md). `release.yml` = `r<N>`, `release-kr.yml` = `k<N>`;
+   run 번호는 workflow마다 따로 세므로 접두어로 구분)
 5. digest 조회 후 `<acr>.azurecr.io/safe-demo@sha256:...` 형태로 `release.json` 생성
 6. `release-<run_id>` artifact 업로드 (90일 보존)
 
 **지역 job**: `region.yml` 을 `region`/`environment`/`profile` 입력으로 호출합니다.
 앞 지역 결과가 `success` 일 때만 다음 지역이 실행됩니다.
+
+## 2.2.1 `release-kr.yml` – 빌드 + KR만 (빠른 무중단 검증)
+
+| 항목 | 값 |
+| --- | --- |
+| 용도 | 데모/검증을 빠르게 반복. `release.yml` 과 같은 build·승인·canary·health gate·evidence, KR 이후 중단 |
+| 트리거 | `workflow_dispatch`, `profile` = `demo`(기본) / `production` |
+| 동시성 | `safe-aca-production` (release/restore/retire와 같은 lock) |
+| 승인 | `prod-kr` 1회 |
+| 버전 라벨 | `k<run 번호>` (예: `k1`, `k2`) |
+
+```powershell
+gh workflow run release-kr.yml --repo <repo> --ref main     # profile=demo
+```
+
+주의:
+
+- SEA/USW는 바뀌지 않으므로 지역 간 버전이 달라질 수 있습니다. 운영 상태를 맞추려면 `release.yml` 을 실행합니다.
+- `demo-retire.yml`, `restore.yml` 은 이 run ID를 `source_run_id` 로 받을 수 있습니다(`check_source.py` 허용 목록).
+  baseline이 KR에만 있으므로 restore는 `region=kr` 로 실행합니다(`all` 이면 usw/sea는 snapshot 없음으로 안전 실패 후 kr 수행).
 
 ## 2.3 `region.yml` – 지역 1곳 배포
 
@@ -70,7 +96,7 @@ job 제한 시간은 240분입니다(production 3단계 × 1시간 + 대기 여�
 
 `restore-region.yml` 단계:
 
-1. `python scripts/check_source.py` – 원본 run이 이 저장소의 `release.yml`,
+1. `python scripts/check_source.py` – 원본 run이 이 저장소의 `release.yml` 또는 `release-kr.yml`,
    `workflow_dispatch`, `main`, `completed` 인지 GitHub API로 검증하고 `sha` 출력
 2. 원본 run의 `baseline-<source_run_id>-<region>` artifact 다운로드
 3. snapshot의 `commit`/`run_id` 가 검증된 원본과 일치하는지 확인

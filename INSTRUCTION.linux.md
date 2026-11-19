@@ -59,6 +59,23 @@ docker build --platform linux/amd64 -t safe-demo:local app
 docker run --rm -p 8080:8080 safe-demo:local
 ```
 
+### 무중단 종료(SIGTERM drain) 로컬 확인
+
+```bash
+LONG_TASK_SECONDS=20 GRACE_SECONDS=40 python3 app/server.py &
+pid=$!
+# 브라우저에서 http://localhost:8080/verify 를 열고 "긴 작업 시작" 클릭, 또는:
+curl -s -X POST http://localhost:8080/api/long-task &
+sleep 3
+kill -TERM "$pid"
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/readyz   # 503 (draining)
+wait "$pid"; echo "exit=$?"                                            # 약 20초 뒤 exit=0
+```
+
+긴 작업 응답에 `"drainObserved": true` 가 표시되고 서버 로그에 `kind: lifecycle`
+`draining` → `stopped`(`reason: idle`) 가 남아야 합니다. 화면과 데모 절차는
+[manual/05-zero-downtime-demo.md](manual/05-zero-downtime-demo.md)를 참고합니다.
+
 ## 3. 최초 Azure bootstrap
 
 > Bootstrap은 최초 생성 전용입니다. 라이브 앱에 재실행하거나 릴리스, 복구,

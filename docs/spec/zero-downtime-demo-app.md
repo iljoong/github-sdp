@@ -247,13 +247,13 @@ SERVING --SIGTERM--> DRAINING --(inflight == 0) or (deadline)--> STOPPED (exit 0
 | --- | --- | --- | --- |
 | ZDD-E01 | EXISTING | `/work` business contract and telemetry | Existing tests keep passing |
 | ZDD-E02 | EXISTING | `candidate_probes` backward-compatible candidate policy | `test_safety.py` |
-| ZDD-R00 | PROPOSED | Spike: confirm deactivated-revision FQDN reachability and in-flight request survival on ACA (section 4 platform risk) | Nonproduction run notes; decides fallback before ZDD-R05 |
-| ZDD-R01 | PROPOSED | Endpoints of 6.1 incl. CORS and non-business logging | Unit tests per endpoint; log kind test |
-| ZDD-R02 | PROPOSED | Drain state machine of 6.2 | Deterministic tests: ready→503 on drain, new long task 503, in-flight completes, exit before deadline, deadline exit with in-flight |
-| ZDD-R03 | PROPOSED | Probe split and grace policy of 6.3 | Tests: expected candidate has grace; old snapshot unchanged; null normalization |
-| ZDD-R04 | PROPOSED | Verification page of section 5 | Manual run against local app incl. SIGTERM (`kill -TERM`) |
-| ZDD-R05 | PROPOSED | Demo retire workflow/script of 6.4 | Tests: refuses without success evidence, on drift, on non-zero stable traffic |
-| ZDD-R06 | PROPOSED | Documentation of section 8 | Review |
+| ZDD-R00 | PROPOSED | Spike: confirm deactivated-revision FQDN reachability and in-flight request survival on ACA (section 4 platform risk) | Nonproduction run notes; decides fallback before ZDD-R05. Not run: owner chose to build retire first; fallback reading documented in manual 5.9 |
+| ZDD-R01 | IMPLEMENTED | Endpoints of 6.1 incl. CORS and non-business logging | `tests/test_zero_downtime.py` `EndpointTests` (version, status, readyz, CORS/OPTIONS, 429 cap, 503 while draining, log kinds) |
+| ZDD-R02 | IMPLEMENTED | Drain state machine of 6.2 | `LifecycleTests` (ready→503, new task 503, in-flight completes, idle exit, deadline exit with in-flight, settings validation/clamp); `ProcessSignalTests` POSIX only; Windows in-process SIGTERM run recorded in plan ledger |
+| ZDD-R03 | IMPLEMENTED | Probe split and grace policy of 6.3 | `tests/test_safety.py` `test_grace_policy_file_is_valid`, `test_candidate_grace_override_and_legacy_snapshot`, `test_null_grace_is_normalized`, `test_candidate_grace_drift_is_rejected`; readiness `/readyz` probe test |
+| ZDD-R04 | IMPLEMENTED | Verification page of section 5 | `test_verify_page_declares_tunables_and_endpoints`, `test_dockerfile_bakes_version_and_page`; headless Edge run against local app incl. SIGTERM (commit `f03e485` body) |
+| ZDD-R05 | IMPLEMENTED | Demo retire workflow/script of 6.4 | `test_retire_refuses_without_matching_success`, `test_retire_refuses_on_drift`, `test_retire_refuses_unready_candidate`, `test_retire_deactivates_then_verifies`, `test_retire_times_out_if_stable_stays_active`, workflow lock test |
+| ZDD-R06 | IMPLEMENTED | Documentation of section 8 | [manual chapter 5](../../manual/05-zero-downtime-demo.md), manual 2/3/4, README, INSTRUCTION files; final review pending |
 | ZDD-R07 | PROPOSED | End-to-end nonproduction demo per section 4 | Run IDs and evidence; not run yet |
 
 ## 8. Documentation deliverables

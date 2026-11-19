@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import subprocess
 import sys
@@ -252,8 +253,14 @@ class EndpointTests(unittest.TestCase):
         self.assertTrue(headers["Content-Type"].startswith("text/html"))
         self.assertIn(b"POLL_INTERVAL_MS", body)
 
+    def test_home_page_served(self):
+        status, headers, body = self.call("/")
+        self.assertEqual(status, 200)
+        self.assertTrue(headers["Content-Type"].startswith("text/html"))
+        self.assertIn("Zero-downtime demo app", body.decode("utf-8"))
+
     def test_new_endpoints_never_log_business(self):
-        for path in ("/readyz", "/api/version", "/status", "/verify"):
+        for path in ("/", "/readyz", "/api/version", "/status", "/verify"):
             self.call(path)
         self.call("/api/long-task", "POST")
         self.call("/status", "OPTIONS")
@@ -307,11 +314,21 @@ class ArtifactTests(unittest.TestCase):
                        "/status", "/api/long-task", "긴 작업 시작"):
             self.assertIn(needle, page)
 
+    def test_home_page_lists_every_api_endpoint_but_not_pages(self):
+        page = (ROOT / "app" / "index.html").read_text(encoding="utf-8")
+        listed = set(re.findall(r'\bp:\s*"([^"]+)"', page))
+        documented = {line.split()[1] for line in server.__doc__.split("Drain state machine")[0].splitlines()
+                      if line.strip().startswith(("GET ", "POST "))}
+        self.assertEqual(listed, documented - {"/", "/verify"} | {"/api/*, /status"})
+        for needle in ('"system"', '"light"', '"dark"', "prefers-color-scheme", "localStorage"):
+            self.assertIn(needle, page)
+
     def test_dockerfile_bakes_version_and_page(self):
         dockerfile = (ROOT / "app" / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("ARG APP_VERSION", dockerfile)
         self.assertIn("ENV APP_VERSION=$APP_VERSION", dockerfile)
         self.assertIn("verify.html", dockerfile)
+        self.assertIn("index.html", dockerfile)
         build = (ROOT / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
         self.assertIn("--build-arg APP_VERSION=", build)
         for script in ("bootstrap.sh", "bootstrap.ps1"):

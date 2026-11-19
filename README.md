@@ -80,6 +80,7 @@ Phase 2/3은 승인 대기 초안이며 requirement/evidence ledger로 상태를
 | --- | --- |
 | [app/](app/) | `/healthz`, `/readyz`, `/work` 와 무중단 데모용 `/api/version`, `/status`, `/api/long-task`, SIGTERM drain을 제공하는 데모 앱 |
 | [app/verify.html](app/verify.html) | `/verify` 무중단 배포 검증 화면 (1초 폴링, revision 카드, 긴 작업 버튼) |
+| [app/index.html](app/index.html) | `/` 소개 화면: 앱 설명, endpoint 목록과 설명, Swagger형 Execute, System/Light/Dark 테마 |
 | [.github/workflows/release.yml](.github/workflows/release.yml) | 이미지 빌드와 3개 지역 순차 배포 진입 workflow |
 | [.github/workflows/release-kr.yml](.github/workflows/release-kr.yml) | 빠른 무중단 검증용: 빌드 후 KR만 배포, 기본 `quick` 프로필(0→50→100%, 단계별 60초) (공유 [build.yml](.github/workflows/build.yml) 사용) |
 | [.github/workflows/restore.yml](.github/workflows/restore.yml) | baseline artifact 기반 보호된 복구 workflow |

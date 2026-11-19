@@ -56,7 +56,7 @@
 | `.github\workflows\restore-region.yml` | 지역 1곳의 복구 (재사용 workflow) |
 | `.github\workflows\oidc-inspect.yml` | Azure 접근 없이 환경별 OIDC claim만 수집 |
 | `.github\workflows\demo-retire.yml` | 데모 전용: 완료된 release의 이전 revision 비활성화 (SIGTERM 시연) |
-| `app\` | `/healthz`, `/readyz`, `/work`, `/api/version`, `/status`, `/api/long-task`, `/verify` 를 제공하는 데모 앱 |
+| `app\` | `/`(소개·endpoint 목록), `/healthz`, `/readyz`, `/work`, `/api/version`, `/status`, `/api/long-task`, `/verify` 를 제공하는 데모 앱 |
 | `infra\` | 공유 ACR / pull identity, 지역별 ACA 환경·앱·Log Analytics (Bicep), probe·grace 정책 |
 | `scripts\` | 구성(bootstrap/identity), 배포(snapshot/rollout/metrics/demo_load), 검증(check_source/inspect_oidc) 도구 |
 | `tests\` | 안전성/health gate/demo load 단위 테스트 |

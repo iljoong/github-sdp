@@ -4,7 +4,7 @@ WORKDIR /app
 # the Container App template: the pipeline copies the stable env into the candidate.
 ARG APP_VERSION=dev
 ENV APP_VERSION=$APP_VERSION
-COPY server.py verify.html ./
+COPY server.py index.html verify.html ./
 USER 65532:65532
 ENV PYTHONUNBUFFERED=1 PORT=8080
 EXPOSE 8080

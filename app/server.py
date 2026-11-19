@@ -1,6 +1,7 @@
 """Zero-downtime demo app; Python standard library only.
 
 Endpoints
+    GET  /                app intro + endpoint list with in-page Execute (index.html)
     GET  /healthz         liveness: always 200 while the process serves HTTP
     GET  /readyz          readiness: 200 while SERVING, 503 while DRAINING
     GET  /work            business contract + `kind: business` log (SDP health gate)
@@ -175,6 +176,7 @@ class Lifecycle:
 
 DEFAULT_LIFECYCLE = Lifecycle(Settings.from_env({}))
 VERIFY_PAGE = Path(__file__).resolve().parent / "verify.html"
+PAGES = {"/": VERIFY_PAGE.parent / "index.html", "/verify": VERIFY_PAGE}
 CORS_HEADERS = {"Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
                 "Access-Control-Allow-Headers": "Content-Type",
@@ -279,11 +281,12 @@ class Handler(BaseHTTPRequestHandler):
         started = time.monotonic()
         path = self.path.split("?", 1)[0]
         revision = os.environ.get("CONTAINER_APP_REVISION", "local")
-        if path == "/verify":
-            if VERIFY_PAGE.is_file():
-                self.send_body(200, VERIFY_PAGE.read_bytes(), "text/html; charset=utf-8")
+        if path in PAGES:
+            page = PAGES[path]
+            if page.is_file():
+                self.send_body(200, page.read_bytes(), "text/html; charset=utf-8")
             else:
-                self.send_json(404, {"error": "verify.html missing"}, path)
+                self.send_json(404, {"error": f"{page.name} missing"}, path)
             return
         demo = self.demo_get(path, revision)
         if demo is not None:

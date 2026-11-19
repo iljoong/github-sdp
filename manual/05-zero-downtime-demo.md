@@ -9,6 +9,8 @@
 > 설계 근거: [docs/spec/zero-downtime-demo-app.md](../docs/spec/zero-downtime-demo-app.md)
 > (결정 D1–D11, 요구 사항 ZDD-R00–R07)
 
+> 실제 준비·실행·테스트 절차와 실습 중 만난 문제는 [6장](06-zero-downtime-demo-guide.md)을 참고하세요.
+
 ## 5.1 목적과 원리
 
 | 보여 주는 것 | 구현 방법 |

@@ -20,8 +20,8 @@
 | --- | --- | --- |
 | liveness vs readiness | `/healthz`(프로세스 살아 있음) / `/readyz`(새 요청 받을 수 있음) 분리 | drain 중에는 ready=✗ 로 새 트래픽만 빼고, 살아 있으므로 재시작되지 않음 |
 | SIGTERM 처리 | 신호 핸들러는 플래그만 세움 → 메인 루프가 `DRAINING` 전환 → 진행 중 작업 종료 후 exit 0 | 신호 핸들러에서 lock을 잡으면 교착(deadlock) 위험. 실제로 이 버그를 테스트로 잡고 수정함 |
-| 종료 유예 | `terminationGracePeriodSeconds = 30` (`infra/revision-policy.json`, ACA 기본값) | 앱 `GRACE_SECONDS` 도 30으로 맞추고 긴 작업을 15초로 자동 제한해 SIGKILL 전에 끝냄. 더 긴 작업은 grace를 올리거나 `LONG_TASK_ABORT_ON_DRAIN=Y` 로 즉시 응답 |
-| 앱 측 상한 | 긴 작업 ≤ `min(LONG_TASK_SECONDS, GRACE − MARGIN − 5, 230)` | ACA ingress 요청 timeout 240초, SIGKILL 전 여유 |
+| 종료 유예 | `terminationGracePeriodSeconds = 30` (`infra/revision-policy.json`, ACA 기본값) | 앱 `GRACE_SECONDS` 도 30으로 맞춤. 긴 작업(120초)은 drain 시 기본이면 20초 deadline에 끊기고, `LONG_TASK_ABORT_ON_DRAIN=Y` 면 즉시 `task_incompleted` 응답 |
+| 앱 측 상한 | 긴 작업 ≤ `min(LONG_TASK_SECONDS, 230)` (grace로는 줄이지 않음) | ACA ingress 요청 timeout 240초, SIGKILL 전 여유 |
 | 점진적 전환 | canary 0 → 10 → 50 → 100% (quick 프로필: 0 → 50 → 100%), 단계별 bake + Log Analytics health gate | 문제를 일부 트래픽에서 먼저 발견, 실패 시 자동 복구 |
 | 이전 revision 유지 | 운영 release는 이전 revision을 **활성 상태로 남김** | 즉시 restore 가능. 그래서 데모에서는 `demo-retire.yml` 로 따로 SIGTERM을 발생시킴 |
 
@@ -87,7 +87,7 @@ curl.exe -s https://<APP FQDN>/api/version   # version, revision, dnsSuffix 필�
 | 1 | `gh workflow run release.yml --repo <repo> --ref main -f profile=demo` | build 성공 후 `prod-kr` 승인 대기 |
 | 2 | Actions → run → **Review deployments** → `prod-kr` 승인 | 10% → 50% → 100% 동안 스트립 두 색 혼합 → v2 색. **오류 0** |
 | 3 | `prod-sea`, `prod-usw` 도 승인하고 **run 전체 완료**까지 대기 | v2 카드 등장, v1 카드 트래픽 0%·`SERVING` |
-| 4 | v1 카드 **"긴 작업 시작"** 클릭 (또는 6.4-C curl로 v1 revision FQDN 호출) | 진행 막대 `0s / 약 15s` (15초라 retire job 시작을 보고 누르거나 여러 번 클릭) |
+| 4 | v1 카드 **"긴 작업 시작"** 클릭 (또는 6.4-C curl로 v1 revision FQDN 호출) | 진행 막대 `0s / 약 120s` |
 | 5 | 바로 retire 실행 후 `prod-kr` 승인 (아래) | — |
 | 6 | deactivate → v1 replica SIGTERM | v1 카드 `DRAINING`, ready ✗, grace 30s부터 감소 |
 | 7 | 작업 종료 시 | `완료 … task_completed · drainObserved: 예` (`LONG_TASK_ABORT_ON_DRAIN=Y` 면 즉시 `중단 응답 … task_incompleted`), 약 2초 뒤 v1 카드 `STOPPED` |
@@ -262,7 +262,7 @@ release 동안 `err` 가 0으로 유지되고 버전이 v1 → (혼합) → v2 �
 
 ### C. 긴 작업 직접 호출 (curl)
 
-요청 body는 필요 없습니다. grace 30에서는 작업이 15초로 제한되지만, grace를 올린 환경(최대 230초)도 고려해 timeout(`-m`)을 240으로 둡니다.
+요청 body는 필요 없습니다. 작업은 기본 120초(최대 230초)이므로 timeout(`-m`)을 240으로 둡니다.
 Windows에서는 `curl.exe` 를 명시합니다(PowerShell의 `curl` 별칭 회피).
 
 ```powershell

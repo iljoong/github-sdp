@@ -56,6 +56,21 @@ class LifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "LONG_TASK_SECONDS"):
             server.Settings.from_env({"LONG_TASK_SECONDS": "soon"})
 
+    def test_signal_during_locked_section_does_not_deadlock(self):
+        lifecycle = self.lifecycle()
+        handlers = {}
+        with patch.object(server.signal, "signal", side_effect=lambda sig, fn: handlers.__setitem__(sig, fn)):
+            server.install_signal_handlers(lifecycle)
+        self.assertEqual(set(handlers), {server.signal.SIGTERM, server.signal.SIGINT})
+        # The main thread may be inside should_exit() holding the lock when the signal lands.
+        with lifecycle._lock:
+            caller = threading.Thread(target=handlers[server.signal.SIGTERM], args=(server.signal.SIGTERM, None))
+            caller.start()
+            caller.join(1)
+            self.assertFalse(caller.is_alive(), "signal handler blocked on the lifecycle lock")
+        self.assertFalse(lifecycle.should_exit())
+        self.assertEqual(lifecycle.state, "DRAINING")
+
     def test_drain_rejects_new_tasks_keeps_inflight(self):
         lifecycle = self.lifecycle()
         status, task = lifecycle.start_task()

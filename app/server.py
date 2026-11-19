@@ -97,6 +97,7 @@ class Lifecycle:
         self._drain_started_at = None
         self._last_finish = None
         self._tasks = {}
+        self._drain_requested = False
 
     @property
     def state(self):
@@ -148,7 +149,13 @@ class Lifecycle:
                 "longTaskSeconds": self.settings.long_task_seconds,
             }
 
+    def request_drain(self):
+        # Called from signal handlers: must not take self._lock (the main thread may hold it).
+        self._drain_requested = True
+
     def should_exit(self):
+        if self._drain_requested:
+            self.begin_drain()
         with self._lock:
             if self._state == "STOPPED":
                 return True
@@ -317,18 +324,21 @@ class Handler(BaseHTTPRequestHandler):
                 }), flush=True)
 
 
+def install_signal_handlers(lifecycle):
+    def on_signal(_signum, _frame):
+        lifecycle.request_drain()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, on_signal)
+
+
 def run(settings, port):
     lifecycle = Lifecycle(settings)
     httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     # In-flight threads must not block exit once the grace deadline is reached.
     httpd.daemon_threads = True
     httpd.lifecycle = lifecycle
-
-    def on_signal(_signum, _frame):
-        lifecycle.begin_drain()  # signal-safe: flag + timestamp only
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(sig, on_signal)
+    install_signal_handlers(lifecycle)
     serving = threading.Thread(target=httpd.serve_forever, daemon=True)
     serving.start()
     lifecycle.log("serving", port=port, graceSeconds=settings.grace_seconds,

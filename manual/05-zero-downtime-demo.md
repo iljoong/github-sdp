@@ -210,7 +210,7 @@ gh workflow run restore.yml --repo $repo --ref main -f source_run_id=<RELEASE_RU
 | 긴 작업 길이, 동시 개수, 종료 여유 | `app/server.py` `Settings.from_env` 기본값 또는 앱 env | 5.5 규칙, `tests/test_zero_downtime.py` `LifecycleTests` |
 | 자동 상한(230초) | `server.py` `INGRESS_TIMEOUT_CAP_SECONDS` | ACA ingress timeout |
 | drain 종료 조건 | `server.py` `Lifecycle.should_exit` | `LifecycleTests` |
-| 신호 처리 | `server.py` `run()` 의 `on_signal` | `ProcessSignalTests` (POSIX) |
+| 신호 처리 | `server.py` `install_signal_handlers()` → `Lifecycle.request_drain()` (lock 없이 플래그만 설정, 실제 전환은 main loop의 `should_exit()`) | `test_signal_during_locked_section_does_not_deadlock`, `ProcessSignalTests` (POSIX) |
 | 엔드포인트 응답 필드 | `server.py` `Handler.demo_get`, `Handler.long_task` | `EndpointTests`, `verify.html` 의 사용처 |
 | CORS 허용 경로 | `server.py` `cors_path`, `CORS_HEADERS` | 화면이 revision FQDN을 호출하는지 |
 | grace 값 | `infra/revision-policy.json` → 새 release | `scripts/snapshot.py`, `common.expected_candidate`, `infra/region.bicep` |

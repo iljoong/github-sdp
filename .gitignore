@@ -8,5 +8,6 @@ infra/*.json
 !infra/*parameters.json
 !infra/health-probes.json
 !infra/revision-policy.json
-
+
 _*
+.superpowers/

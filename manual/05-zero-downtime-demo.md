@@ -186,7 +186,17 @@ gh run watch <RETIRE_RUN_ID> --repo $repo
 ## 5.10 retire 이후 복구
 
 retire 후에는 그 release의 이전 revision이 비활성이므로 `restore.yml` 이
-`Stable unavailable` 로 **안전하게 거부**합니다(설계상 정상). 되돌려야 한다면:
+`Stable unavailable` 로 **안전하게 거부**합니다(설계상 정상).
+
+왜 거부하나: restore는 트래픽을 baseline의 이전 stable revision으로 100% 옮깁니다.
+옮기기 전 `scripts/common.py` `guarded_state()` 가 그 revision이 `ready()` 인지,
+즉 `active=true`, `Healthy`, `Provisioned`, `Running` 인지 확인합니다. retire는 바로 이
+revision을 `deactivate` 했으므로 replica가 0개입니다. 확인 없이 트래픽을 보내면
+모든 요청이 실패하므로, restore는 아무것도 바꾸지 않고 멈춥니다. 재활성화는 같은
+revision 이름과 template을 다시 기동하는 것이라 baseline의 template hash 검사도 그대로
+통과합니다.
+
+되돌려야 한다면:
 
 ```powershell
 # 1. 이전 revision 재활성화 (같은 template으로 새 replica 기동)

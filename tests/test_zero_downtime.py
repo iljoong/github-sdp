@@ -36,16 +36,16 @@ class LifecycleTests(unittest.TestCase):
         settings = server.Settings.from_env({k: str(v) for k, v in env.items()})
         return server.Lifecycle(settings, clock=lambda: self.now[0])
 
-    def test_settings_defaults_and_clamp(self):
+    def test_settings_defaults_and_ingress_cap(self):
         defaults = server.Settings.from_env({})
-        self.assertEqual(defaults.long_task_seconds, 15)
+        self.assertEqual(defaults.long_task_seconds, 120)
         self.assertEqual(defaults.grace_seconds, 30)
         self.assertEqual(defaults.margin_seconds, 10)
         self.assertEqual(defaults.idle_seconds, 2)
         self.assertEqual(defaults.max_concurrent, 3)
         self.assertIs(defaults.abort_on_drain, False)
         self.assertEqual(server.Settings.from_env(
-            {"GRACE_SECONDS": "180", "LONG_TASK_SECONDS": "500"}).long_task_seconds, 165)
+            {"GRACE_SECONDS": "30", "LONG_TASK_SECONDS": "500"}).long_task_seconds, 230)
         self.assertEqual(server.Settings.from_env(
             {"GRACE_SECONDS": "180"}).long_task_seconds, 120)
         self.assertEqual(server.Settings.from_env(

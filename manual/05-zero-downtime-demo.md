@@ -74,7 +74,7 @@ SERVING ────────────────────────
 | `APP_VERSION` | `dev` | **이미지** (`app/Dockerfile` `ARG`, `build.yml` 이 `release.yml` 은 `r<run 번호>`, `release-kr.yml` 은 `k<run 번호>`, bootstrap 이 `bootstrap`) | 화면의 큰 버전 글자. template env에 넣지 말 것(5.5) |
 | `terminationGracePeriodSeconds` | 30 | `infra/revision-policy.json` | ACA가 SIGTERM 후 SIGKILL까지 기다리는 시간 (ACA 기본값과 동일) |
 | `GRACE_SECONDS` | 30 | candidate env (위 정책 값에서 자동 생성) | 앱이 deadline 계산과 화면 카운트다운에 사용 |
-| `LONG_TASK_SECONDS` | 120 | 앱 env (기본값은 `server.py`) | 긴 작업 길이. 자동 상한 적용(5.5) → grace 30에서는 **15초** |
+| `LONG_TASK_SECONDS` | 120 | 앱 env (기본값은 `server.py`) | 긴 작업 길이. 상한 230초(5.5). grace와 무관하게 적용 → drain 중 결과 확인용 |
 | `LONG_TASK_ABORT_ON_DRAIN` | `N` | 앱 env | `Y`(대소문자 무관): drain 시작 시 진행 중 긴 작업을 즉시 `task_incompleted` 로 응답. 그 외 값/미설정: 끝까지 실행 |
 | `SHUTDOWN_MARGIN_SECONDS` | 10 | 앱 env | SIGKILL 전에 스스로 종료하기 위한 여유 (`< GRACE_SECONDS`) |
 | `DRAIN_IDLE_SECONDS` | 2 | 앱 env | 마지막 작업 종료 후 화면이 최종 상태를 볼 수 있게 기다리는 시간 |
@@ -93,8 +93,8 @@ SERVING ────────────────────────
 ## 5.5 안전하게 값을 바꾸는 규칙
 
 1. **`LONG_TASK_SECONDS` ≤ `GRACE_SECONDS` − `SHUTDOWN_MARGIN_SECONDS` − 5** 이어야 작업이
-   SIGKILL 전에 끝납니다. 더 크게 주면 앱이 자동으로 이 값으로 줄입니다(grace 30 → 15초).
-   120초 작업을 시연하려면 grace를 135초 이상으로 올립니다.
+   SIGKILL 전에 끝납니다. 앱은 이 값으로 줄이지 **않습니다**(기본 120초 > grace 30의 deadline 20초).
+   따라서 grace 30에서 drain 중인 작업은 기본(`N`)이면 deadline(20초)에 끊겨 클라이언트 오류, `LONG_TASK_ABORT_ON_DRAIN=Y` 면 즉시 `task_incompleted` 입니다. 끝까지 완료를 보이려면 grace를 135초 이상으로 올리거나 `LONG_TASK_SECONDS` 를 15 이하로 둡니다.
    **앱의 `GRACE_SECONDS` 와 template grace가 다르면** (예: Portal에서 template만 30으로 변경)
    앱은 120초 작업을 계속하다 30초 시점에 SIGKILL 되고, 클라이언트는 `503 no healthy upstream` 을 받습니다(실측).
 2. **긴 작업 ≤ 230초**: ACA ingress 요청 timeout이 240초이므로 앱이 230초로 자동 제한합니다.
@@ -137,10 +137,10 @@ draining replica로 계속 라우팅되는지, 열려 있는 요청이 비활성
 | T0 | `https://<APP FQDN>/verify` 를 연다 | 큰 글자 v1(예: `r41`), 스트립이 v1 색으로 채워짐, v1 카드 `SERVING` |
 | T1 | `gh workflow run release.yml -f profile=demo` 후 kr 승인 (빠르게: `gh workflow run release-kr.yml`, KR만·quick 프로필) | 10% → 50% → 100% (quick: 50% → 100%) 동안 스트립이 두 색으로 섞이다가 v2 색으로 바뀜. **오류 0** |
 | T2 | release run이 **전체 완료**될 때까지 기다림 (sea, usw 승인 포함) | v2 카드 등장. v1 카드: 트래픽 0%, `SERVING`, ready ✓ |
-| T3 | `prod-kr` retire 승인 후, retire job이 deactivate 단계에 들어가기 직전에 v1 카드의 **"긴 작업 시작"** 클릭 | v1 카드에 진행 막대 `0s / 약 15s` |
+| T3 | `prod-kr` retire 승인 후, retire job이 deactivate 단계에 들어가기 직전에 v1 카드의 **"긴 작업 시작"** 클릭 | v1 카드에 진행 막대 `0s / 약 120s` |
 | T4 | (T3 전에) `demo-retire.yml` 실행 후 `prod-kr` 승인 (아래 명령) | — |
 | T5 | (deactivate → v1 replica에 SIGTERM) | v1 카드 `DRAINING`, ready ✗, grace 남음 30s부터 감소 |
-| T6 | 작업 종료 시 | 기본: `완료 … task_completed · drainObserved: 예`. `LONG_TASK_ABORT_ON_DRAIN=Y`: 즉시 `중단 응답 … task_incompleted`. 약 2초 뒤 v1 카드 `STOPPED` |
+| T6 | drain 후 | 기본(grace 30): 약 20초 뒤 앱 종료로 `실패 … 사유`(작업 끊김). grace ≥ 135면 `완료 … task_completed · drainObserved: 예`. `LONG_TASK_ABORT_ON_DRAIN=Y`: 즉시 `중단 응답 … task_incompleted`. 약 2초 뒤 v1 카드 `STOPPED` |
 | T7 | 정리 | 스트립은 처음부터 끝까지 빨강 없음, 오류 카운터 0 |
 
 ```powershell

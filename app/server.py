@@ -21,7 +21,8 @@ Drain state machine
 Environment (read once at startup; invalid values fail fast)
     APP_VERSION                dev   label shown on /verify (baked into the image)
     RELEASE_ID                 bootstrap
-    LONG_TASK_SECONDS          120   clamped to min(value, GRACE - MARGIN - 5, 230) -> 15 with grace 30
+    LONG_TASK_SECONDS          120   capped at 230 (ingress timeout); longer than the drain
+                                     deadline (GRACE - MARGIN) means it is cut off unless aborted
     GRACE_SECONDS              30    must equal template terminationGracePeriodSeconds (1..600)
     SHUTDOWN_MARGIN_SECONDS    10    exit this long before SIGKILL
     DRAIN_IDLE_SECONDS         2     linger after the last task so /verify can see it
@@ -86,7 +87,9 @@ class Settings:
         if long_task < 0 or idle < 0 or limit < 1:
             raise ValueError("LONG_TASK_SECONDS/DRAIN_IDLE_SECONDS must be >= 0 and "
                              "LONG_TASK_MAX_CONCURRENT >= 1")
-        long_task = min(long_task, max(grace - margin - 5, 0), INGRESS_TIMEOUT_CAP_SECONDS)
+        # Not capped by grace on purpose: a task longer than the grace lets the
+        # demo show the drain outcome (deadline cut-off, or task_incompleted with abort).
+        long_task = min(long_task, INGRESS_TIMEOUT_CAP_SECONDS)
         abort = env.get("LONG_TASK_ABORT_ON_DRAIN", "N").strip().upper() == "Y"
         return cls(long_task, grace, margin, idle, limit, abort)
 

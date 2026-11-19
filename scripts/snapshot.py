@@ -46,6 +46,8 @@ def main():
         "stable_template_hash": digest(props(baseline)["template"]),
         "stable_template": props(baseline)["template"],
         "candidate_probes": load(Path(__file__).resolve().parents[1] / "infra" / "health-probes.json"),
+        "candidate_termination_grace_seconds": load(
+            Path(__file__).resolve().parents[1] / "infra" / "revision-policy.json")["terminationGracePeriodSeconds"],
     })
     print(f"Captured read-only baseline {path}; upload it BEFORE any write.")
 

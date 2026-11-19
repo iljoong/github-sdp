@@ -82,7 +82,8 @@ class SafetyTests(unittest.TestCase):
                     "template": template()}}
                 with patch.dict(os.environ, environment), \
                      patch.object(snapshot_script.Path, "exists", return_value=False), \
-                     patch.object(snapshot_script, "load", return_value=release), \
+                     patch.object(snapshot_script, "load", side_effect=lambda path: (
+                         release if path == "release.json" else common.load(path))), \
                      patch.object(snapshot_script, "app", return_value=value), \
                      patch.object(snapshot_script, "revision", return_value=baseline), \
                      patch.object(snapshot_script, "az", return_value=[]), \
@@ -221,7 +222,8 @@ class SafetyTests(unittest.TestCase):
         probes = common.load(ROOT / "infra" / "health-probes.json")
         self.assertEqual([p["type"] for p in probes], ["Startup", "Readiness", "Liveness"])
         for probe in probes:
-            self.assertEqual(probe["httpGet"], {"path": "/healthz", "port": 8080, "scheme": "HTTP"})
+            expected_path = "/readyz" if probe["type"] == "Readiness" else "/healthz"
+            self.assertEqual(probe["httpGet"], {"path": expected_path, "port": 8080, "scheme": "HTTP"})
             self.assertEqual(probe["timeoutSeconds"], 5)
             self.assertGreaterEqual(probe["initialDelaySeconds"], 1)
             self.assertLessEqual(probe["initialDelaySeconds"], 60)
@@ -236,6 +238,47 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual((liveness["periodSeconds"], liveness["failureThreshold"]), (10, 3))
         self.assertIn("probes: loadJsonContent('./health-probes.json')",
                       (ROOT / "infra" / "region.bicep").read_text())
+
+    def test_grace_policy_file_is_valid(self):
+        grace = common.load(ROOT / "infra" / "revision-policy.json")["terminationGracePeriodSeconds"]
+        self.assertIsInstance(grace, int)
+        self.assertEqual(grace, 180)
+        self.assertTrue(1 <= grace <= 600)
+        self.assertIn("revision-policy.json", (ROOT / "infra" / "region.bicep").read_text())
+
+    def test_candidate_grace_override_and_legacy_snapshot(self):
+        s = snapshot()
+        s["candidate_termination_grace_seconds"] = 180
+        before = json.loads(json.dumps(s))
+        candidate = common.expected_candidate(s)
+        self.assertEqual(candidate["terminationGracePeriodSeconds"], 180)
+        self.assertEqual(candidate["containers"][0]["env"],
+                         [{"name": "GRACE_SECONDS", "value": "180"}, {"name": "RELEASE_ID", "value": "123"}])
+        self.assertEqual(s, before)
+        s["stable_template"]["containers"][0]["env"].append({"name": "GRACE_SECONDS", "value": "30"})
+        self.assertEqual(common.expected_candidate(s)["containers"][0]["env"],
+                         [{"name": "GRACE_SECONDS", "value": "180"}, {"name": "RELEASE_ID", "value": "123"}])
+        legacy = snapshot()
+        candidate = common.expected_candidate(legacy)
+        self.assertNotIn("terminationGracePeriodSeconds", candidate)
+        self.assertEqual(candidate["containers"][0]["env"], [{"name": "RELEASE_ID", "value": "123"}])
+
+    def test_null_grace_is_normalized(self):
+        self.assertEqual(common.normalized_template({"terminationGracePeriodSeconds": None, "containers": []}),
+                         {"containers": []})
+        self.assertEqual(common.normalized_template({"terminationGracePeriodSeconds": 30, "containers": []}),
+                         {"terminationGracePeriodSeconds": 30, "containers": []})
+
+    def test_candidate_grace_drift_is_rejected(self):
+        s = snapshot()
+        s["candidate_termination_grace_seconds"] = 180
+        candidate = common.expected_candidate(s)
+        with patch.object(common, "revision", return_value={
+                "name": s["candidate"], "properties": {"template": candidate}}):
+            common.candidate_owned(s)
+            candidate["terminationGracePeriodSeconds"] = 30
+            with self.assertRaisesRegex(RuntimeError, "Candidate template drift"):
+                common.candidate_owned(s)
 
     def test_candidate_probe_override_preserves_stable_and_legacy_recovery_templates(self):
         s = snapshot()
@@ -306,6 +349,7 @@ class SafetyTests(unittest.TestCase):
             snapshot_script.main()
         captured = save.call_args.args[1]
         self.assertEqual(captured["candidate_probes"], common.load(ROOT / "infra" / "health-probes.json"))
+        self.assertEqual(captured["candidate_termination_grace_seconds"], 180)
         self.assertEqual(captured["stable_template"], baseline)
         self.assertEqual(captured["stable_template_hash"], common.digest(baseline))
         self.assertEqual(baseline["containers"][0]["probes"][0]["timeoutSeconds"], 2)

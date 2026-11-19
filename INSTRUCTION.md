@@ -56,7 +56,8 @@ Candidate revision의 `revisionSuffix`가 null/생략된 경우에는 반환된 
 ### Azure 및 GitHub 권한
 
 초기 설치자는 구독에서 Contributor와 Role Based Access Control Administrator
-(또는 Owner), 그리고 Entra 애플리케이션/서비스 주체 생성 권한이 필요합니다.
+(또는 Owner)가 필요합니다. 배포 identity는 user-assigned managed identity이므로 Entra
+애플리케이션/서비스 주체 생성 권한은 필요하지 않습니다.
 실제 배포 identity에는 Owner, 구독 Contributor, client secret이 필요하지 않습니다.
 
 GitHub-hosted Ubuntu 24.04 runner, Actions artifact v4, 그리고 required reviewer를
@@ -233,9 +234,14 @@ JWT 전체를 출력하거나 보관하지 마세요.
 
 ### 5.3 환경별 identity 생성
 
-helper는 claim 파일의 실제 `sub`를 사용해 환경별 Entra application/service
-principal, federated credential, 최소 Azure RBAC, GitHub Environment variables를
-만듭니다. client secret은 만들지 않습니다.
+helper는 claim 파일의 실제 `sub`를 사용해 환경별 user-assigned managed identity,
+federated credential, 최소 Azure RBAC, GitHub Environment variables를 만듭니다.
+managed identity는 client secret을 가질 수 없습니다. 먼저 identity 전용 RG를 만듭니다
+(쓰기 권한자를 최소화하세요).
+
+```powershell
+az group create -n safeaca-identity -l koreacentral
+```
 
 ```powershell
 .\scripts\configure-identity.ps1 `

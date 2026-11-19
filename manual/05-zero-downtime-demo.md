@@ -54,6 +54,7 @@ SERVING ────────────────────────
 | `GET /status` | `{state, ready, inflight[], drainStartedAt, graceSeconds, graceRemaining, longTaskSeconds, revision, replica}` | 200 | 200 |
 | `POST /api/long-task` | `LONG_TASK_SECONDS` 동안 작업 후 `{id, revision, replica, durationMs, completed, drainObserved}` | 200 (replica당 동시 3개 초과 시 **429**) | 새 요청 **503**, 진행 중 작업은 계속 |
 | `GET /verify` | 검증 화면 (`app/verify.html`) | 200 | 200 |
+| `GET /` | 소개 화면 (`app/index.html`): 앱 설명, 현재 버전/상태, Swagger형 endpoint 목록과 **Execute**, System/Light/Dark 테마 | 200 | 200 |
 
 - `/api/*`, `/status` 는 CORS(`Access-Control-Allow-Origin: *`)와 `OPTIONS` preflight를 지원합니다.
   화면이 공유 FQDN에서 열린 뒤 revision 전용 FQDN을 직접 호출하기 때문입니다.
@@ -229,6 +230,7 @@ gh workflow run restore.yml --repo $repo --ref main -f source_run_id=<RELEASE_RU
 | grace 값 | `infra/revision-policy.json` → 새 release | `scripts/snapshot.py`, `common.expected_candidate`, `infra/region.bicep` |
 | probe 경로/타이밍 | `infra/health-probes.json` → 새 release | `tests/test_safety.py` probe 테스트 |
 | 화면 주기·색·창 크기 | `app/verify.html` 맨 위 `CONFIG` | — |
+| 소개 화면 endpoint 목록·설명 | `app/index.html` `ENDPOINTS` (server.py docstring의 Endpoints와 일치, `/`·`/verify` 제외) | `ArtifactTests.test_home_page_lists_every_api_endpoint_but_not_pages` |
 | 카드 상태 규칙 | `verify.html` `pollStatus()` | 5.8 표 |
 | 버전 라벨 형식 | `.github/workflows/build.yml` `--build-arg APP_VERSION=`, 호출 측 `version_prefix` | `app/Dockerfile` `ARG` |
 | retire 안전 조건/대기 시간 | `scripts/retire.py` `retire(timeout=300, interval=5)` | `tests/test_safety.py` `test_retire_*` |

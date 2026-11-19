@@ -258,7 +258,7 @@ done
 
 release 동안 `err` 가 0으로 유지되고 버전이 v1 → (혼합) → v2 로 바뀌면 성공입니다.
 
-> 루트 `/` 는 라우트가 없어 **404** 입니다. 헬스 확인은 `/healthz`, 버전은 `/api/version` 을 쓰세요.
+> 루트 `/` 는 소개 화면(`app/index.html`)입니다. endpoint별 설명과 curl을 보고 **Execute**로 바로 호출할 수 있습니다.
 
 ### C. 긴 작업 직접 호출 (curl)
 
@@ -366,7 +366,7 @@ gh workflow run restore.yml --repo <repo> --ref main -f source_run_id=<release r
 | release KR `azure/login` 실패 `AADSTS53003` | 테넌트 Conditional Access가 workload identity(Entra 앱 SP) 차단 | user-assigned managed identity + federated credential로 전환. 대신 GitHub environment 보호(branch·승인자)를 1차 통제로 |
 | UAMI 구성 중 `AuthorizationFailed` | 실행자가 구독 Contributor만 보유(역할 할당 불가) | 대상 scope에 조건부 RBAC Administrator(4개 역할·ServicePrincipal만) 임시 부여 후 실행, 완료 후 회수 |
 | SEA가 snapshot에서 실패할 뻔함 | KR만 정리하고 SEA/USW는 min 0 revision에 트래픽 | release는 지역 선택이 없으므로 **3개 지역 모두** 사전 점검 |
-| smoke test 404 | `/` 라우트 없음 | `/healthz`, `/api/version` 사용 |
+| smoke test 404 | (이전 이미지) `/` 라우트 없음 | `/healthz`, `/api/version` 사용. 현재 이미지는 `/` 가 소개 화면(200) |
 | retire가 시작하지 않고 대기 | release가 sea/usw 진행 중 (같은 concurrency group) | release 전체 완료 후 실행 |
 | retire 후 `restore.yml` 거부 | 이전 revision 비활성 | `revision activate` 후 restore (6.6) |
 | KQL 조회가 전체 열 반환 / `SYN0002` | Windows에서 여러 줄 인자 잘림, `kind` 예약어 | 한 줄로 변환, 열 이름 변경 (6.4-E) |

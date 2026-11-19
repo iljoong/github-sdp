@@ -1,0 +1,255 @@
+<!doctype html>
+<!--
+  데모 앱 소개 페이지 (/). 단일 파일, 외부 의존성 없음.
+  - 상단: 앱 설명 + 현재 version/state (2초마다 GET /api/version, /status)
+  - Endpoints: Swagger형 아코디언. 펼치면 설명·Parameters·Responses·curl·Execute(이 서버로 직접 호출)
+  - 테마: System(기본, prefers-color-scheme) / Light / Dark. 선택은 localStorage "theme" 에 저장
+  endpoint 목록(ENDPOINTS)은 server.py docstring의 Endpoints 와 같아야 한다 (/, /verify 페이지는 제외).
+  tests/test_zero_downtime.py ArtifactTests 가 이 일치를 검사한다.
+-->
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zero-downtime demo app</title>
+<script>
+  // 첫 페인트 전에 테마를 적용해 깜빡임을 막는다. "system" 이면 data-theme 을 두지 않는다.
+  (function () {
+    const saved = localStorage.getItem("theme");
+    if (saved === "light" || saved === "dark") document.documentElement.dataset.theme = saved;
+  })();
+</script>
+<style>
+  :root {
+    color-scheme: light;
+    --bg:#f8fafc; --panel:#ffffff; --code:#f1f5f9; --line:#e2e8f0; --text:#0f172a; --strong:#020617;
+    --muted:#64748b; --link:#2563eb; --acc:#2563eb; --ok:#16a34a; --warn:#d97706; --bad:#dc2626;
+    --get:#3b82f6; --get-tint:rgba(59,130,246,.08); --get-line:#bfdbfe;
+    --post:#f59e0b; --post-tint:rgba(245,158,11,.10); --post-line:#fde68a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg:#0f172a; --panel:#1e293b; --code:#0b1222; --line:#334155; --text:#e2e8f0; --strong:#ffffff;
+      --muted:#94a3b8; --link:#93c5fd; --acc:#3b82f6; --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444;
+      --get:#60a5fa; --get-tint:rgba(96,165,250,.08); --get-line:#1e3a5f;
+      --post:#f59e0b; --post-tint:rgba(245,158,11,.08); --post-line:#5c4210;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg:#0f172a; --panel:#1e293b; --code:#0b1222; --line:#334155; --text:#e2e8f0; --strong:#ffffff;
+    --muted:#94a3b8; --link:#93c5fd; --acc:#3b82f6; --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444;
+    --get:#60a5fa; --get-tint:rgba(96,165,250,.08); --get-line:#1e3a5f;
+    --post:#f59e0b; --post-tint:rgba(245,158,11,.08); --post-line:#5c4210;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 system-ui,"Segoe UI","Malgun Gothic",sans-serif; background:var(--bg); color:var(--text); }
+  a { color:var(--link); }
+  code, pre { font-family:ui-monospace,Consolas,monospace; font-size:12.5px; }
+  .muted { color:var(--muted); }
+  button { background:var(--acc); color:#fff; border:0; border-radius:6px; padding:6px 12px; font:inherit; cursor:pointer; }
+  button:disabled { opacity:.6; cursor:not-allowed; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--text); }
+  main { max-width:960px; margin:0 auto; padding:32px 24px 64px; }
+  header { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; flex-wrap:wrap;
+           border-bottom:1px solid var(--line); padding-bottom:16px; }
+  h1 { margin:0; font-size:26px; }
+  h2 { font-size:17px; margin:28px 0 8px; }
+  .side { display:flex; flex-direction:column; align-items:flex-end; gap:8px; }
+  .pill { background:var(--panel); border:1px solid var(--line); border-radius:999px; padding:4px 12px; white-space:nowrap; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--muted); margin-right:6px; }
+  .dot.SERVING { background:var(--ok); } .dot.DRAINING { background:var(--warn); } .dot.UNREACHABLE { background:var(--bad); }
+  .theme { display:inline-flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  .theme button { background:transparent; color:var(--muted); border-radius:0; padding:3px 10px; font-size:12.5px; }
+  .theme button[aria-pressed="true"] { background:var(--acc); color:#fff; }
+  .m { display:inline-block; min-width:58px; text-align:center; padding:1px 6px; border-radius:4px;
+       font-size:11px; font-weight:700; color:#0f172a; }
+  .m.GET { background:var(--get); } .m.POST { background:var(--post); } .m.OPTIONS { background:#94a3b8; }
+  .grp { margin:18px 0 6px; font-size:12px; color:var(--muted); letter-spacing:.06em; text-transform:uppercase; }
+  .op { border:1px solid var(--line); border-radius:8px; margin-bottom:8px; overflow:hidden; background:var(--panel); }
+  .op.GET { border-color:var(--get-line); } .op.POST { border-color:var(--post-line); }
+  .op > summary { list-style:none; display:flex; align-items:center; gap:12px; padding:8px 12px; cursor:pointer; }
+  .op > summary::-webkit-details-marker { display:none; }
+  .op.GET > summary { background:var(--get-tint); } .op.POST > summary { background:var(--post-tint); }
+  .op > summary code { font-size:14px; color:var(--strong); font-weight:600; }
+  .op > summary .t { color:var(--muted); flex:1; }
+  .op > summary .chev { color:var(--muted); transition:transform .15s; }
+  .op[open] > summary .chev { transform:rotate(90deg); }
+  .body { padding:12px 16px 16px; border-top:1px solid var(--line); }
+  .body h4 { margin:14px 0 6px; font-size:12px; color:var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:.05em; }
+  .body h4:first-child { margin-top:0; }
+  table.params { border-collapse:collapse; width:100%; }
+  table.params td, table.params th { text-align:left; padding:5px 8px; border-bottom:1px solid var(--line); font-size:13px; }
+  table.params th { color:var(--muted); font-weight:500; }
+  .codes td:first-child { width:70px; }
+  select, input { background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:4px; padding:3px 6px; font:inherit; }
+  pre { background:var(--code); border:1px solid var(--line); padding:10px 12px; border-radius:6px; overflow:auto; margin:0; }
+  .exec { display:flex; gap:8px; align-items:center; margin-top:12px; }
+  .exec .run { min-width:110px; }
+  .resline { display:flex; gap:14px; align-items:center; flex-wrap:wrap; margin-bottom:6px; font-size:12.5px; }
+  .code { font-weight:700; padding:1px 8px; border-radius:4px; color:#fff; }
+  .code.s2 { background:var(--ok); } .code.s4 { background:var(--warn); } .code.s5, .code.s0 { background:var(--bad); }
+  .note { background:var(--post-tint); border-left:3px solid var(--warn); padding:6px 10px; font-size:12.5px; border-radius:4px; margin-top:8px; }
+  .copy { background:transparent; border:1px solid var(--line); color:var(--muted); padding:2px 8px; font-size:12px; margin-left:6px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Zero-downtime demo app</h1>
+      <div class="muted">SDP 배포 파이프라인 교육용 샘플 · Python 표준 라이브러리만 사용</div>
+    </div>
+    <div class="side">
+      <div class="pill"><span class="dot" id="dot"></span><b data-bind="version">—</b> · <span data-bind="state">—</span></div>
+      <div class="theme" role="group" aria-label="테마">
+        <button data-theme-choice="system">System</button><button data-theme-choice="light">Light</button><button data-theme-choice="dark">Dark</button>
+      </div>
+    </div>
+  </header>
+
+  <h2>이 앱은 무엇인가요?</h2>
+  <p>Azure Container Apps에 KR → SEA → USW 순서로 canary 배포되는 데모 서비스입니다.
+     readiness/liveness 프로브, <code>SIGTERM</code> 수신 시 drain(진행 중 요청 완료 후 종료),
+     긴 작업(long task)을 제공해 <b>배포 중에도 요청이 끊기지 않는지</b> 눈으로 확인할 수 있습니다.</p>
+  <ul>
+    <li><b>무중단 확인</b> — <a href="verify">/verify</a> 페이지가 1초마다 <code>/api/version</code>을 호출해 버전 전환과 오류 0건을 보여줍니다.</li>
+    <li><b>Graceful shutdown</b> — SIGTERM → <code>/readyz</code> 503 → 진행 중 작업 완료 → 종료 (grace <span data-bind="graceSeconds">—</span>s).</li>
+    <li><b>SDP health gate</b> — <code>/work</code> 호출마다 <code>kind: business</code> 로그를 남겨 파이프라인이 성공률을 판정합니다.</li>
+  </ul>
+  <p class="muted">현재 revision <code data-bind="revision">—</code> · replica <code data-bind="replica">—</code> · release <code data-bind="release">—</code></p>
+
+  <h2>Endpoints <span class="muted" style="font-size:13px;font-weight:400">— 행을 펼쳐 설명을 보고 <b>Execute</b>로 이 서버에 바로 호출</span></h2>
+  <div id="ops"></div>
+</main>
+
+<script>
+const STATUS_POLL_MS = 2000;
+const GROUPS = [["user", "데모 사용자 API"], ["platform", "Probes & 상태 (ACA 플랫폼)"], ["pipeline", "SDP 파이프라인"]];
+const ENDPOINTS = [
+  { m:"GET", p:"/api/version", who:"user", t:"버전 정보",
+    d:"APP_VERSION(이미지에 bake된 버전 라벨), release, revision, replica, DNS suffix, 현재 시각을 반환합니다.",
+    codes:[[200, "버전 정보 JSON"]] },
+  { m:"POST", p:"/api/long-task", who:"user", t:"긴 작업",
+    d:"LONG_TASK_SECONDS 동안 실행되는 작업입니다. replica가 SIGTERM을 받아 drain 중이어도 끝까지 완료되며, 응답의 drainObserved로 확인합니다.",
+    note:"응답까지 LONG_TASK_SECONDS(기본 120초, 배포 설정에 따라 다름) 걸립니다. Cancel은 브라우저 대기만 멈추며 서버 작업은 계속됩니다.",
+    codes:[[200, "완료. completed=true, drainObserved=drain 중 완료 여부"],
+           [429, "replica당 동시 실행 한도(LONG_TASK_MAX_CONCURRENT) 초과"],
+           [503, "DRAINING 중이라 새 작업 거부"]] },
+  { m:"GET", p:"/healthz", who:"platform", t:"Liveness probe",
+    d:"프로세스가 HTTP를 처리하는 동안 항상 200입니다. 실패하면 ACA가 컨테이너를 재시작합니다. Startup probe도 이 경로를 씁니다.",
+    codes:[[200, "프로세스 생존"]] },
+  { m:"GET", p:"/readyz", who:"platform", t:"Readiness probe",
+    d:"SERVING이면 200, SIGTERM 이후 DRAINING이면 503을 반환해 ACA가 새 트래픽을 보내지 않게 합니다.",
+    codes:[[200, "SERVING — 트래픽 수신"], [503, "DRAINING — 새 트래픽 중단"]] },
+  { m:"GET", p:"/status", who:"platform", t:"Drain 상태",
+    d:"state, 진행 중 long task(inflight), drain 시작 시각, grace 남은 시간을 반환합니다. /verify 화면의 revision 카드가 사용합니다.",
+    codes:[[200, "상태 JSON"]] },
+  { m:"GET", p:"/work", who:"pipeline", t:"Business 계약",
+    d:"응답마다 kind: business 로그를 남기고, SDP health gate가 이 로그로 canary 성공률을 판정합니다. 헤더로 트래픽 출처를 분류합니다.",
+    params:[{ n:"X-Safe-Source", opts:["organic", "demo", "control", "probe"], d:"business 로그의 source (기본 organic)" },
+            { n:"X-Safe-Run", d:"business 로그의 monitor_run (선택)" }],
+    codes:[[200, "ok=true, result=42"], [503, "DEMO_FAILURE_PERCENT 에 따른 실패"]] },
+  { m:"OPTIONS", p:"/api/*, /status", who:"pipeline", t:"CORS preflight", noExec:true,
+    d:"/verify 화면이 revision FQDN을 직접 호출할 수 있도록 브라우저가 자동으로 보내는 preflight입니다.",
+    codes:[[204, "CORS 허용 헤더, 본문 없음"]] },
+];
+
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
+const base = location.href.replace(/[?#].*$/, "").replace(/\/$/, "");
+const url = p => base + p;
+
+// ---------- theme ----------
+function applyTheme(choice) {
+  if (choice === "light" || choice === "dark") document.documentElement.dataset.theme = choice;
+  else { delete document.documentElement.dataset.theme; choice = "system"; }
+  localStorage.setItem("theme", choice);
+  document.querySelectorAll("[data-theme-choice]").forEach(b =>
+    b.setAttribute("aria-pressed", String(b.dataset.themeChoice === choice)));
+}
+document.querySelectorAll("[data-theme-choice]").forEach(b => b.onclick = () => applyTheme(b.dataset.themeChoice));
+applyTheme(localStorage.getItem("theme") || "system");
+
+// ---------- live status ----------
+async function poll() {
+  let live;
+  try {
+    const [v, s] = await Promise.all([fetch(url("/api/version")).then(r => r.json()), fetch(url("/status")).then(r => r.json())]);
+    live = { ...v, ...s };
+  } catch { live = { state:"UNREACHABLE" }; }
+  document.getElementById("dot").className = "dot " + live.state;
+  document.querySelectorAll("[data-bind]").forEach(el => el.textContent = live[el.dataset.bind] ?? "—");
+}
+
+// ---------- endpoints ----------
+function render(e, i) {
+  const params = e.params
+    ? `<table class="params"><tr><th>이름</th><th>위치</th><th>값</th><th>설명</th></tr>${e.params.map(p =>
+        `<tr><td><code>${p.n}</code></td><td class="muted">header</td><td>${p.opts
+          ? `<select data-h="${p.n}"><option value="">(없음)</option>${p.opts.map(o => `<option>${o}</option>`).join("")}</select>`
+          : `<input data-h="${p.n}" placeholder="optional">`}</td><td class="muted">${p.d}</td></tr>`).join("")}</table>`
+    : `<span class="muted">없음</span>`;
+  return `<details class="op ${e.m}" data-i="${i}"><summary><span class="m ${e.m}">${e.m}</span><code>${esc(e.p)}</code>
+      <span class="t">${e.t}</span><span class="chev">▸</span></summary>
+    <div class="body">
+      <h4>설명</h4><div>${e.d}</div>${e.note ? `<div class="note">${e.note}</div>` : ""}
+      <h4>Parameters</h4>${params}
+      <h4>Responses</h4><table class="params codes">${e.codes.map(([c, d]) =>
+        `<tr><td><span class="code s${String(c)[0]}">${c}</span></td><td>${d}</td></tr>`).join("")}</table>
+      <h4>curl<button class="copy">복사</button></h4><pre class="curl"></pre>
+      ${e.noExec ? `<p class="muted">브라우저가 자동으로 보내는 요청이라 여기서 직접 실행하지 않습니다.</p>`
+        : `<div class="exec"><button class="run">Execute</button><button class="ghost cancel" hidden>Cancel</button><button class="ghost clear" hidden>Clear</button></div>
+           <div class="result" hidden><h4>Server response</h4><div class="resline"></div><pre class="res"></pre></div>`}
+    </div></details>`;
+}
+
+function wire(op) {
+  const e = ENDPOINTS[op.dataset.i];
+  const $ = sel => op.querySelector(sel);
+  const headers = () => Object.fromEntries([...op.querySelectorAll("[data-h]")].filter(x => x.value).map(x => [x.dataset.h, x.value]));
+  const renderCurl = () => {
+    const h = Object.entries(headers()).map(([k, v]) => ` -H "${k}: ${v}"`).join("");
+    $(".curl").textContent = e.noExec
+      ? `curl -si -X OPTIONS ${url("/api/version")} -H "Origin: https://example.com" -H "Access-Control-Request-Method: GET"`
+      : `curl -s${e.m === "POST" ? " -X POST" : ""}${h} ${url(e.p)}`;
+  };
+  renderCurl();
+  op.querySelectorAll("[data-h]").forEach(x => x.oninput = renderCurl);
+  $(".copy").onclick = ev => {
+    navigator.clipboard?.writeText($(".curl").textContent);
+    ev.target.textContent = "복사됨"; setTimeout(() => ev.target.textContent = "복사", 1500);
+  };
+  if (e.noExec) return;
+  const run = $(".run"), cancel = $(".cancel"), clear = $(".clear"), result = $(".result"), line = $(".resline"), res = $(".res");
+  let ctl;
+  run.onclick = async () => {
+    ctl = new AbortController();
+    const t0 = performance.now();
+    run.disabled = true; cancel.hidden = false; clear.hidden = true; result.hidden = false; res.textContent = "";
+    const timer = setInterval(() => line.innerHTML = `<span class="muted">요청 중… ${Math.floor((performance.now() - t0) / 1000)}s</span>`, 250);
+    try {
+      const r = await fetch(url(e.p), { method:e.m, headers:headers(), signal:ctl.signal, cache:"no-store" });
+      const text = await r.text();
+      line.innerHTML = `<span class="code s${String(r.status)[0]}">${r.status}</span><span>${Math.round(performance.now() - t0)} ms</span>
+        <span class="muted">content-type: ${esc(r.headers.get("content-type"))} · cache-control: ${esc(r.headers.get("cache-control"))}</span>`;
+      try { res.textContent = JSON.stringify(JSON.parse(text), null, 2); } catch { res.textContent = text; }
+    } catch (err) {
+      line.innerHTML = `<span class="code s0">ERR</span><span class="muted">${err.name === "AbortError"
+        ? "취소됨 (서버 작업은 계속 실행될 수 있음)" : esc(err)}</span>`;
+    } finally {
+      clearInterval(timer); run.disabled = false; cancel.hidden = true; clear.hidden = false;
+    }
+  };
+  cancel.onclick = () => ctl?.abort();
+  clear.onclick = () => { result.hidden = true; clear.hidden = true; };
+}
+
+document.getElementById("ops").innerHTML = GROUPS.map(([who, label]) => `<div class="grp">${label}</div>` +
+  ENDPOINTS.map((e, i) => e.who === who ? render(e, i) : "").join("")).join("");
+document.querySelectorAll(".op").forEach(wire);
+poll();
+setInterval(poll, STATUS_POLL_MS);
+</script>
+</body>
+</html>

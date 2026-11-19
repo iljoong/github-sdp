@@ -73,6 +73,39 @@
   #C .ep .copy:hover { color:var(--text); }
   @media (max-width:900px) { #C .hero, #C .cols { grid-template-columns:1fr; } #B { grid-template-columns:1fr; } #B aside { display:none; } }
 
+  /* ---------- D: A 문서형 + Swagger형 endpoint 아코디언 ---------- */
+  #D { max-width:960px; margin:0 auto; padding:32px 24px 90px; }
+  #D header { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; border-bottom:1px solid var(--line); padding-bottom:16px; }
+  #D h1 { margin:0; font-size:26px; }
+  #D .pill { background:var(--panel); border:1px solid var(--line); border-radius:999px; padding:4px 12px; white-space:nowrap; }
+  #D h2 { font-size:17px; margin:28px 0 8px; }
+  #D .grp { margin:18px 0 6px; font-size:12px; color:var(--muted); letter-spacing:.06em; text-transform:uppercase; }
+  #D .op { border:1px solid var(--line); border-radius:8px; margin-bottom:8px; overflow:hidden; }
+  #D .op.GET { border-color:#1e3a5f; } #D .op.POST { border-color:#5c4210; }
+  #D .op > summary { list-style:none; display:flex; align-items:center; gap:12px; padding:8px 12px; cursor:pointer; }
+  #D .op > summary::-webkit-details-marker { display:none; }
+  #D .op.GET > summary { background:rgba(96,165,250,.08); } #D .op.POST > summary { background:rgba(245,158,11,.08); }
+  #D .op > summary code { font-size:14px; color:#fff; font-weight:600; }
+  #D .op > summary .t { color:var(--muted); flex:1; }
+  #D .op > summary .chev { color:var(--muted); transition:transform .15s; }
+  #D .op[open] > summary .chev { transform:rotate(90deg); }
+  #D .body { padding:12px 16px 16px; border-top:1px solid var(--line); }
+  #D .body h4 { margin:14px 0 6px; font-size:12px; color:var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:.05em; }
+  #D .body h4:first-child { margin-top:0; }
+  #D table.params { border-collapse:collapse; width:100%; }
+  #D table.params td, #D table.params th { text-align:left; padding:5px 8px; border-bottom:1px solid var(--line); font-size:13px; }
+  #D table.params th { color:var(--muted); font-weight:500; }
+  #D select, #D input { background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:4px; padding:3px 6px; font:inherit; }
+  #D pre { background:#0b1222; border:1px solid var(--line); padding:10px 12px; border-radius:6px; overflow:auto; margin:0; }
+  #D .exec { display:flex; gap:8px; align-items:center; margin-top:12px; }
+  #D .exec .run { min-width:110px; }
+  #D .resline { display:flex; gap:14px; align-items:center; margin-bottom:6px; font-size:12.5px; }
+  #D .code { font-weight:700; padding:1px 8px; border-radius:4px; color:#0f172a; }
+  #D .code.s2 { background:var(--ok); } #D .code.s4 { background:var(--warn); } #D .code.s5, #D .code.s0 { background:var(--bad); color:#fff; }
+  #D .codes td:first-child { width:70px; font-weight:600; }
+  #D .note { background:rgba(245,158,11,.1); border-left:3px solid var(--warn); padding:6px 10px; font-size:12.5px; border-radius:4px; }
+  #D .copy { background:transparent; border:1px solid var(--line); color:var(--muted); padding:2px 8px; font-size:12px; }
+
   /* ---------- prototype switcher (not part of the design) ---------- */
   #proto { position:fixed; left:50%; bottom:16px; transform:translateX(-50%); display:flex; align-items:center; gap:10px;
            background:#fde047; color:#111; border-radius:999px; padding:6px 10px; box-shadow:0 6px 24px rgba(0,0,0,.5);
@@ -144,6 +177,31 @@ curl -s -X POST http://localhost:8080/api/long-task</pre>
   <p class="lede">SDP 파이프라인 교육용 데모 서비스입니다. 배포 중에도 요청이 끊기지 않도록 readiness/liveness 프로브와
      SIGTERM drain을 구현했고, 파이프라인은 <code>/work</code> 로그로 canary 단계를 판정합니다. 아래는 누가 어떤 endpoint를 쓰는지입니다.</p>
   <div class="cols" id="C-cols"></div>
+</div>
+
+<!-- ======================= D: A + Swagger ======================= -->
+<div id="D" data-variant="D">
+  <header>
+    <div>
+      <h1>Zero-downtime demo app</h1>
+      <div class="muted">SDP 배포 파이프라인 교육용 샘플 · Python 표준 라이브러리만 사용</div>
+    </div>
+    <div class="pill"><span class="dot" data-bind="dot"></span><b data-bind="version">—</b> · <span data-bind="state">—</span></div>
+  </header>
+
+  <h2>이 앱은 무엇인가요?</h2>
+  <p>Azure Container Apps에 KR → SEA → USW 순서로 canary 배포되는 데모 서비스입니다.
+     readiness/liveness 프로브, <code>SIGTERM</code> 수신 시 drain(진행 중 요청 완료 후 종료),
+     긴 작업(long task)을 제공해 <b>배포 중에도 요청이 끊기지 않는지</b> 눈으로 확인할 수 있습니다.</p>
+  <ul>
+    <li><b>무중단 확인</b> — <a href="/verify">/verify</a> 페이지가 1초마다 <code>/api/version</code>을 호출해 버전 전환과 오류 0건을 보여줍니다.</li>
+    <li><b>Graceful shutdown</b> — SIGTERM → <code>/readyz</code> 503 → 진행 중 작업 완료 → 종료 (grace <span data-bind="grace">—</span>s).</li>
+    <li><b>SDP health gate</b> — <code>/work</code> 호출마다 <code>kind: business</code> 로그를 남겨 파이프라인이 성공률을 판정합니다.</li>
+  </ul>
+  <p class="muted">현재 revision <code data-bind="revision">—</code> · replica <code data-bind="replica">—</code> · release <code data-bind="release">—</code></p>
+
+  <h2>Endpoints <span class="muted" style="font-size:13px;font-weight:400">— 행을 펼쳐 설명을 보고 <b>Execute</b>로 이 서버에 바로 호출</span></h2>
+  <div id="D-ops"></div>
 </div>
 
 <div id="proto"><button id="prev">←</button><span id="label"></span><button id="next">→</button></div>
@@ -235,8 +293,84 @@ document.getElementById("C-cols").innerHTML = Object.keys(WHO).map(w =>
      <div><b>${e.t}</b></div><div class="d">${e.d}</div></div>`).join("") + `</div>`).join("");
 document.querySelectorAll("#C .copy").forEach(b => b.onclick = () => { navigator.clipboard?.writeText(b.dataset.c); b.textContent = "✓ 복사됨"; });
 
+// ---------- D ----------
+const DETAIL = {
+  "/":             { codes:[[200,"HTML 페이지"]], html:true },
+  "/verify":       { codes:[[200,"HTML 페이지"],[404,"verify.html 누락"]], html:true },
+  "/api/version":  { codes:[[200,"버전 정보 JSON"]] },
+  "/api/long-task":{ codes:[[200,"완료. completed=true, drainObserved=drain 중 완료 여부"],[429,"replica당 동시 실행 한도(LONG_TASK_MAX_CONCURRENT) 초과"],[503,"DRAINING 중이라 새 작업 거부"]],
+                     note:"응답까지 LONG_TASK_SECONDS(기본 120초, 로컬 설정에 따라 다름) 걸립니다. 배포 중 실행하면 이전 revision이 drain되어도 완료되는지 확인할 수 있습니다." },
+  "/healthz":      { codes:[[200,"항상 200 (프로세스 생존)"]] },
+  "/readyz":       { codes:[[200,"SERVING — 트래픽 수신"],[503,"DRAINING — 새 트래픽 중단"]] },
+  "/status":       { codes:[[200,"state, inflight[], graceRemaining 등"]] },
+  "/work":         { codes:[[200,"ok=true, result=42"],[503,"DEMO_FAILURE_PERCENT에 따른 실패"]],
+                     params:[{ n:"X-Safe-Source", in:"header", opts:["organic","demo","control","probe"], d:"business 로그의 source 분류" },
+                             { n:"X-Safe-Run", in:"header", d:"business 로그의 monitor_run (선택)" }] },
+};
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const groups = [["user","데모 사용자 API"],["platform","Probes & 상태 (ACA 플랫폼)"],["pipeline","SDP 파이프라인"]];
+document.getElementById("D-ops").innerHTML = groups.map(([w, label]) => `<div class="grp">${label}</div>` +
+  ENDPOINTS.filter(e => e.who === w).map((e, i) => {
+    const det = DETAIL[e.p] || { codes:[[204,"preflight 응답 (본문 없음)"]] };
+    const id = "op" + e.p.replace(/\W/g, "_");
+    return `<details class="op ${e.m}" id="${id}"><summary><span class="m ${e.m}">${e.m}</span><code>${esc(e.p)}</code>
+        <span class="t">${e.t}</span><span class="chev">▸</span></summary>
+      <div class="body">
+        <h4>설명</h4><div>${e.d}</div>
+        ${det.note ? `<div class="note" style="margin-top:8px">${det.note}</div>` : ""}
+        <h4>Parameters</h4>
+        ${det.params ? `<table class="params"><tr><th>이름</th><th>위치</th><th>값</th><th>설명</th></tr>${det.params.map(p =>
+            `<tr><td><code>${p.n}</code></td><td class="muted">${p.in}</td><td>${p.opts
+              ? `<select data-h="${p.n}"><option value="">(없음)</option>${p.opts.map(o => `<option>${o}</option>`).join("")}</select>`
+              : `<input data-h="${p.n}" placeholder="optional">`}</td><td class="muted">${p.d}</td></tr>`).join("")}</table>`
+          : `<span class="muted">없음</span>`}
+        <h4>Responses</h4>
+        <table class="params codes">${det.codes.map(([c, d]) => `<tr><td><span class="code s${String(c)[0]}">${c}</span></td><td>${d}</td></tr>`).join("")}</table>
+        <h4>curl <button class="copy" data-copy>⧉ 복사</button></h4><pre class="curl"></pre>
+        ${e.noTry ? `<p class="muted">브라우저가 cross-origin 요청 전에 자동으로 보내는 요청이라 직접 실행하지 않습니다.</p>`
+          : det.html ? `<div class="exec"><a href="${e.p}" target="_blank"><button class="run">새 탭에서 열기 ↗</button></a></div>`
+          : `<div class="exec"><button class="run">Execute</button><button class="ghost cancel" hidden>Cancel</button><button class="ghost clear" hidden>Clear</button></div>
+             <div class="result" hidden><h4>Server response</h4><div class="resline"></div><pre class="res"></pre></div>`}
+      </div></details>`;
+  }).join("")).join("");
+
+document.querySelectorAll("#D .op").forEach(op => {
+  const e = ENDPOINTS.find(x => "op" + x.p.replace(/\W/g, "_") === op.id);
+  const headers = () => Object.fromEntries([...op.querySelectorAll("[data-h]")].filter(i => i.value).map(i => [i.dataset.h, i.value]));
+  const renderCurl = () => {
+    const h = Object.entries(headers()).map(([k, v]) => ` -H "${k}: ${v}"`).join("");
+    op.querySelector(".curl").textContent = e.noTry
+      ? `curl -si -X OPTIONS ${location.origin}/api/version -H "Origin: https://example.com"`
+      : `curl -s${e.m === "POST" ? " -X POST" : ""}${h} ${location.origin}${e.p}`;
+  };
+  renderCurl();
+  op.querySelectorAll("[data-h]").forEach(i => i.oninput = renderCurl);
+  op.querySelector("[data-copy]").onclick = ev => { navigator.clipboard?.writeText(op.querySelector(".curl").textContent); ev.target.textContent = "✓ 복사됨"; };
+  const run = op.querySelector(".run:not(a .run)");
+  if (!run || e.noTry || DETAIL[e.p]?.html) return;
+  const cancel = op.querySelector(".cancel"), clear = op.querySelector(".clear"), result = op.querySelector(".result");
+  const line = op.querySelector(".resline"), res = op.querySelector(".res");
+  let ctl, timer;
+  run.onclick = async () => {
+    ctl = new AbortController(); const t0 = performance.now();
+    run.disabled = true; cancel.hidden = false; clear.hidden = true; result.hidden = false; res.textContent = "";
+    timer = setInterval(() => line.innerHTML = `<span class="muted">요청 중… ${((performance.now() - t0) / 1000).toFixed(0)}s</span>`, 250);
+    try {
+      const r = await fetch(e.p, { method:e.m, headers:headers(), signal:ctl.signal });
+      const body = await r.text();
+      line.innerHTML = `<span class="code s${String(r.status)[0]}">${r.status}</span><span>${Math.round(performance.now() - t0)} ms</span>
+        <span class="muted">content-type: ${r.headers.get("content-type")} · cache-control: ${r.headers.get("cache-control")}</span>`;
+      try { res.textContent = JSON.stringify(JSON.parse(body), null, 2); } catch { res.textContent = body; }
+    } catch (err) {
+      line.innerHTML = `<span class="code s0">ERR</span><span class="muted">${err.name === "AbortError" ? "취소됨 (서버 작업은 계속 실행될 수 있음)" : esc(err)}</span>`;
+    } finally { clearInterval(timer); run.disabled = false; cancel.hidden = true; clear.hidden = false; }
+  };
+  cancel.onclick = () => ctl?.abort();
+  clear.onclick = () => { result.hidden = true; clear.hidden = true; };
+});
+
 // ---------- prototype switcher ----------
-const VARIANTS = [["A","문서형 README"],["B","API 콘솔 + Try it"],["C","상태 대시보드 + 역할별"]];
+const VARIANTS = [["D","A + Swagger형 (새 제안)"],["A","문서형 README"],["B","API 콘솔 + Try it"],["C","상태 대시보드 + 역할별"]];
 function show(key) {
   const i = Math.max(0, VARIANTS.findIndex(v => v[0] === key));
   document.querySelectorAll("[data-variant]").forEach(el => el.style.display = el.dataset.variant === VARIANTS[i][0] ? (el.id === "B" ? "grid" : "block") : "none");
@@ -244,7 +378,7 @@ function show(key) {
   const u = new URL(location); u.searchParams.set("variant", VARIANTS[i][0]); history.replaceState(null, "", u);
   return i;
 }
-let cur = show(new URLSearchParams(location.search).get("variant") || "A");
+let cur = show(new URLSearchParams(location.search).get("variant") || "D");
 const step = d => cur = show(VARIANTS[(cur + d + VARIANTS.length) % VARIANTS.length][0]);
 document.getElementById("prev").onclick = () => step(-1);
 document.getElementById("next").onclick = () => step(1);

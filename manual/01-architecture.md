@@ -15,7 +15,7 @@ SDP는 "변경은 점진적으로, 관찰 가능하게, 언제든 되돌릴 수 
 | 빠른 복구 | revision 삭제 없이 트래픽만 baseline으로 되돌림 | `rollout.restore` |
 | 복구 가능성 사전 보장 | 변경 전에 baseline snapshot을 artifact로 영구 저장 | `snapshot.py`, `region.yml` |
 | 폭발 반경 제한 | 실패 지역만 복구, 이미 건강한 선행 지역은 유지 | `release.yml` `needs/if` |
-| 최소 권한 / 비밀 없는 인증 | 환경별 분리 OIDC identity, client secret 없음 | `configure-identity.*`, `inspect_oidc.py` |
+| 최소 권한 / 비밀 없는 인증 | 환경별 분리 OIDC user-assigned managed identity, client secret 불가 | `configure-identity.*`, `inspect_oidc.py` |
 | 감사 가능성(Evidence) | gate 쿼리·결과·실패·복구 기록을 artifact로 90일 보존 | `evidence\<region>\*.json` |
 
 ## 1.2 Azure 리소스 아키텍처

@@ -9,7 +9,9 @@ param(
     [string]$ResourceGroup,
     [string]$ContainerApp,
     [string]$WorkspaceResourceId,
-    [string]$WorkspaceCustomerId
+    [string]$WorkspaceCustomerId,
+    # Dedicated group: anyone who can write here can add federated credentials to these identities.
+    [string]$IdentityResourceGroup = 'safeaca-identity'
 )
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path $PSScriptRoot -Parent)
@@ -57,18 +59,22 @@ if ($Environment -eq 'build') {
 } elseif (-not ($ResourceGroup -and $ContainerApp -and $WorkspaceResourceId -and $WorkspaceCustomerId)) {
     throw 'Regional identity requires ResourceGroup, ContainerApp, WorkspaceResourceId, WorkspaceCustomerId'
 }
-$application = Invoke-Az ad app create --display-name "safe-aca-$($Repository.Replace('/','-'))-$Environment"
-$principal = Invoke-Az ad sp create --id $application.appId
+$identityName = "safe-aca-$($Repository.Replace('/','-'))-$Environment"
+Invoke-Az group show --name $IdentityResourceGroup | Out-Null
+$identity = Invoke-Az identity create --resource-group $IdentityResourceGroup --name $identityName
 # Preserve identifiers immediately, even if subsequent RBAC provisioning fails.
-@{ appObjectId = $application.id; clientId = $application.appId; principalId = $principal.id } |
+@{ identityId = $identity.id; clientId = $identity.clientId; principalId = $identity.principalId } |
     ConvertTo-Json | Set-Content $record -Encoding utf8
+$principal = @{ id = $identity.principalId }
 @{
     name = "github-$Environment"
     issuer = 'https://token.actions.githubusercontent.com'
     subject = $claims.sub
     audiences = @('api://AzureADTokenExchange')
 } | ConvertTo-Json | Set-Content "state\oidc-$Environment.json" -Encoding utf8
-Invoke-Az ad app federated-credential create --id $application.id --parameters "@state\oidc-$Environment.json" | Out-Null
+Invoke-Az identity federated-credential create --resource-group $IdentityResourceGroup --identity-name $identityName `
+    --name "github-$Environment" --issuer 'https://token.actions.githubusercontent.com' `
+    --subject $claims.sub --audiences 'api://AzureADTokenExchange' | Out-Null
 if ($Environment -eq 'build') {
     $registry = Invoke-Az acr show --name $AcrName
     Invoke-Az role assignment create --assignee-object-id $principal.id --assignee-principal-type ServicePrincipal --role AcrPush --scope $registry.id | Out-Null
@@ -84,7 +90,7 @@ if ($Environment -eq 'build') {
     Set-GitHubVariable CONTAINER_APP $ContainerApp
     Set-GitHubVariable LOG_ANALYTICS_WORKSPACE_ID $WorkspaceCustomerId
 }
-Set-GitHubVariable AZURE_CLIENT_ID $application.appId
+Set-GitHubVariable AZURE_CLIENT_ID $identity.clientId
 Set-GitHubVariable AZURE_TENANT_ID $account.tenantId
 Set-GitHubVariable AZURE_SUBSCRIPTION_ID $SubscriptionId
-Write-Host "Configured distinct $Environment OIDC identity. No client secret created. Verify reviewers/branch protection in GitHub."
+Write-Host "Configured distinct $Environment user-assigned managed identity OIDC trust. No client secret is possible. Verify reviewers/branch protection in GitHub."

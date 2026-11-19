@@ -9,7 +9,8 @@ Usage:
     --environment ENVIRONMENT \
     --subscription-id ID \
     --claims-file FILE \
-    [--acr-name NAME]
+    [--acr-name NAME] \
+    [--identity-resource-group NAME]   # default: safeaca-identity (must exist)
 
 Regional environments additionally require:
   --resource-group NAME
@@ -36,9 +37,11 @@ resource_group=
 container_app=
 workspace_resource_id=
 workspace_customer_id=
+# Dedicated group: anyone who can write here can add federated credentials to these identities.
+identity_resource_group=safeaca-identity
 while (($#)); do
   case "$1" in
-    --repository|--environment|--subscription-id|--claims-file|--acr-name|--resource-group|--container-app|--workspace-resource-id|--workspace-customer-id)
+    --repository|--environment|--subscription-id|--claims-file|--acr-name|--resource-group|--container-app|--workspace-resource-id|--workspace-customer-id|--identity-resource-group)
       (($# >= 2)) || { usage >&2; fail "Missing value for $1"; }
       case "$1" in
         --repository) repository=$2 ;;
@@ -50,6 +53,7 @@ while (($#)); do
         --container-app) container_app=$2 ;;
         --workspace-resource-id) workspace_resource_id=$2 ;;
         --workspace-customer-id) workspace_customer_id=$2 ;;
+        --identity-resource-group) identity_resource_group=$2 ;;
       esac
       shift 2
       ;;
@@ -131,18 +135,19 @@ record="state/identity-${environment}.json"
 [[ ! -e "$record" ]] || fail "Identity record exists: $record. Reuse it, do not blindly create duplicate principals."
 oidc_file="state/oidc-${environment}.json"
 
-application=$(az_json ad app create --display-name "safe-aca-${repository//\//-}-${environment}")
-application_id=$(jq -er '.id' <<<"$application")
-client_id=$(jq -er '.appId' <<<"$application")
-principal=$(az_json ad sp create --id "$client_id")
-principal_id=$(jq -er '.id' <<<"$principal")
+identity_name="safe-aca-${repository//\//-}-${environment}"
+az_json group show --name "$identity_resource_group" >/dev/null
+identity=$(az_json identity create --resource-group "$identity_resource_group" --name "$identity_name")
+identity_id=$(jq -er '.id' <<<"$identity")
+client_id=$(jq -er '.clientId' <<<"$identity")
+principal_id=$(jq -er '.principalId' <<<"$identity")
 
 # Persist identifiers immediately, even if later RBAC provisioning fails.
 jq -n \
-  --arg app_object_id "$application_id" \
+  --arg identity_id "$identity_id" \
   --arg client_id "$client_id" \
   --arg principal_id "$principal_id" \
-  '{appObjectId: $app_object_id, clientId: $client_id, principalId: $principal_id}' > "$record"
+  '{identityId: $identity_id, clientId: $client_id, principalId: $principal_id}' > "$record"
 jq -n \
   --arg name "github-${environment}" \
   --arg subject "$subject" \
@@ -152,7 +157,10 @@ jq -n \
     subject: $subject,
     audiences: ["api://AzureADTokenExchange"]
   }' > "$oidc_file"
-az_json ad app federated-credential create --id "$application_id" --parameters "@$oidc_file" >/dev/null
+az_json identity federated-credential create --resource-group "$identity_resource_group" \
+  --identity-name "$identity_name" --name "github-${environment}" \
+  --issuer "https://token.actions.githubusercontent.com" \
+  --subject "$subject" --audiences "api://AzureADTokenExchange" >/dev/null
 
 set_github_variable() {
   local name=$1 value=$2
@@ -180,4 +188,4 @@ fi
 set_github_variable AZURE_CLIENT_ID "$client_id"
 set_github_variable AZURE_TENANT_ID "$tenant_id"
 set_github_variable AZURE_SUBSCRIPTION_ID "$subscription_id"
-printf 'Configured distinct %s OIDC identity. No client secret created. Verify reviewers/branch protection in GitHub.\n' "$environment"
+printf 'Configured distinct %s user-assigned managed identity OIDC trust. No client secret is possible. Verify reviewers/branch protection in GitHub.\n' "$environment"

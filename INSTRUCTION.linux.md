@@ -16,8 +16,9 @@
 - Git, GitHub CLI (`gh`), `jq`
 
 최초 Azure 설치자는 구독에서 Contributor와 Role Based Access Control
-Administrator(또는 Owner), 그리고 Entra 애플리케이션 및 서비스 주체 생성 권한이
-필요합니다. provisioning script 실행 전에 Azure와 GitHub CLI에 로그인하세요.
+Administrator(또는 Owner)가 필요합니다. 배포 identity는 user-assigned managed
+identity이므로 Entra 애플리케이션 생성 권한은 필요하지 않습니다. provisioning script
+실행 전에 Azure와 GitHub CLI에 로그인하세요.
 
 최초 통합 테스트에는 비운영 구독을 사용하세요. 아래 명령은 실제 Azure 리소스를
 생성하며 비용이 발생할 수 있습니다.
@@ -171,8 +172,13 @@ branch 및 environment를 검토합니다.
 
 ### build identity 구성
 
-helper는 검사한 claim `sub`를 사용하고, client secret 없이 federated credential을
-만들며, 최소 Azure role을 할당하고 GitHub Environment variable을 설정합니다.
+helper는 검사한 claim `sub`로 환경별 user-assigned managed identity에 federated
+credential을 만들고(client secret 없음), 최소 Azure role을 할당하고 GitHub Environment
+variable을 설정합니다. 먼저 identity 전용 RG를 만듭니다.
+
+```bash
+az group create -n safeaca-identity -l koreacentral
+```
 
 ```bash
 ./scripts/configure-identity.sh \

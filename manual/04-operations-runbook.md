@@ -19,7 +19,7 @@ $prefix = 'safeaca'
 | 4 | Environment 보호 | 각 환경 | `main` 브랜치 제한, `prod-*` required reviewer, self-review 금지 |
 | 5 | OIDC claim 수집 | `gh workflow run oidc-inspect.yml --repo $repo --ref main` | 7개 artifact |
 | 6 | claim 다운로드 | `gh run download <run> --repo $repo -D state\oidc-claims` | `claims-<env>.json` |
-| 7 | identity 구성 | `configure-identity.ps1` × 7 ([3장 3.3절](03-scripts-reference.md)) | `build` 변수 4개, 지역 환경 변수 6개 |
+| 7 | identity 구성 | `az group create -n safeaca-identity -l koreacentral` 후 `configure-identity.ps1` × 7 ([3장 3.3절](03-scripts-reference.md)) | `build` 변수 4개, 지역 환경 변수 6개 |
 | 8 | demo 릴리스로 E2E 검증 | 4.2절 | 3개 지역 `success.json` |
 
 ## 4.2 릴리스 실행
@@ -161,7 +161,7 @@ guard 오류는 **누군가 파이프라인 밖에서 앱을 변경했거나, �
 | 릴리스마다 | RELEASE_RUN_ID, 승인자, evidence 위치 기록 |
 | 월간 | 비활성 revision 수 확인(`maxInactiveRevisions: 20`), ACR 이미지 보존 정책 점검 |
 | 분기 | 비운영 환경에서 실패 주입(`DEMO_FAILURE_PERCENT`, `DEMO_LATENCY_MS`) + restore 훈련 |
-| 분기 | OIDC identity RBAC 검토, 불필요한 역할 제거, environment 보호 규칙 확인 |
+| 분기 | OIDC identity RBAC 검토, 불필요한 역할 제거, environment 보호 규칙 확인, `safeaca-identity` RG 쓰기 권한자 및 UAMI federated credential 목록 점검 |
 | 변경 시 | 기본 브랜치/지역/환경명 변경 시 workflow, `check_source.py`, `inspect_oidc.py`, `configure-identity.*` 동시 수정 |
 
 ## 4.8 실패 주입 훈련 (비운영 전용)

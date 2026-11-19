@@ -122,6 +122,16 @@ class SafetyTests(unittest.TestCase):
         self.assertNotIn('subject = "repo:', text)
         self.assertIn("$claims.repository_owner_id", text)
 
+    def test_identity_helpers_use_user_assigned_managed_identity(self):
+        # Managed identities need no Entra app-registration rights and cannot hold client secrets.
+        for name in ("configure-identity.ps1", "configure-identity.sh"):
+            with self.subTest(script=name):
+                text = (ROOT / "scripts" / name).read_text()
+                self.assertIn("identity create", text)
+                self.assertIn("identity federated-credential create", text)
+                self.assertNotIn("ad app create", text)
+                self.assertNotIn("ad sp create", text)
+
     def test_fresh_oidc_is_requested_for_long_bakes(self):
         with patch.object(common.time, "monotonic", return_value=2000), \
              patch.object(common, "_next_login", 1000), \

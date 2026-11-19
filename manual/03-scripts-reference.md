@@ -5,7 +5,7 @@
 | 분류 | 파일 | 실행 주체 | Azure 변경 | 요약 |
 | --- | --- | --- | --- | --- |
 | 최초 구성 | `bootstrap.ps1` / `bootstrap.sh` | 운영자(로컬) | **예** (리소스 생성) | ACR, 3개 지역 ACA/Log Analytics 생성, 최초 이미지 배포 |
-| 최초 구성 | `configure-identity.ps1` / `configure-identity.sh` | 운영자(로컬) | **예** (Entra/RBAC) | 환경별 OIDC identity, RBAC, GitHub 변수 생성 |
+| 최초 구성 | `configure-identity.ps1` / `configure-identity.sh` | 운영자(로컬) | **예** (UAMI/RBAC) | 환경별 OIDC managed identity, RBAC, GitHub 변수 생성 |
 | 구성 검증 | `inspect_oidc.py` | `oidc-inspect.yml` | 아니오 | OIDC claim metadata 수집 |
 | 배포 | `snapshot.py` | `region.yml` | 아니오 (읽기 전용) | 배포 직전 baseline 캡처 |
 | 배포/복구 | `rollout.py` | `region.yml`, `restore-region.yml` | **예** (revision, 트래픽) | 카나리 배포·bake·자동/수동 복구 |
@@ -113,16 +113,25 @@ scripts/bootstrap.sh --subscription-id "$subscription" --acr-name "$acr" --prefi
 
 ### 용도
 
-GitHub Environment 하나당 **전용 Entra application + service principal** 을 만들고,
-실제 OIDC claim의 `sub` 로 federated credential을 등록하고, 최소 RBAC 와 GitHub
-Environment variables 를 설정합니다. **client secret은 생성하지 않습니다.**
-배포 workflow에서는 호출되지 않는 프로비저닝 도구입니다.
+GitHub Environment 하나당 **전용 user-assigned managed identity(UAMI)** 를 전용 RG
+(`safeaca-identity`)에 만들고, 실제 OIDC claim의 `sub` 로 federated credential을 등록하고,
+최소 RBAC 와 GitHub Environment variables 를 설정합니다. managed identity는 **client
+secret을 가질 수 없고**, Entra 앱 등록 권한이 필요 없으며, 테넌트의 workload identity
+Conditional Access 정책 대상이 아닙니다(그 대신 GitHub environment 보호가 1차 통제입니다).
+배포 workflow에서는 호출되지 않는 프로비저닝 도구입니다. workflow는 변경 없이
+`AZURE_CLIENT_ID` 만 UAMI의 client ID로 바뀝니다.
 
 ### 사전 조건
 
 - `oidc-inspect.yml` 실행으로 얻은 `claims-<environment>.json`
 - GitHub에 해당 Environment가 미리 생성되어 있을 것 (`gh variable set --env` 대상)
-- `az`, `gh` 로그인 (Bash는 `jq` 추가), Entra app 생성 및 역할 할당 권한
+- identity 전용 RG: `az group create -n safeaca-identity -l koreacentral`.
+  이 RG에 쓰기 권한이 있으면 federated credential을 추가해 배포 identity를 가로챌 수
+  있으므로 접근을 최소화합니다.
+- `az`, `gh` 로그인 (Bash는 `jq` 추가). Azure 권한: identity RG `Contributor`(또는
+  `Managed Identity Contributor`) **와** ACR·지역 RG에 역할 할당 권한(`Owner`, `User Access
+  Administrator` 또는 `Role Based Access Control Administrator`). 구독 `Contributor` 만으로는
+  역할 할당 단계에서 `AuthorizationFailed` 로 멈춥니다.
 
 ### 매개변수
 
@@ -137,6 +146,7 @@ Environment variables 를 설정합니다. **client secret은 생성하지 않�
 | `-ContainerApp` | `--container-app` | 지역 환경 | `CONTAINER_APP` |
 | `-WorkspaceResourceId` | `--workspace-resource-id` | 지역 환경 | `WORKSPACE_RESOURCE_ID` |
 | `-WorkspaceCustomerId` | `--workspace-customer-id` | 지역 환경 | `LOG_ANALYTICS_WORKSPACE_ID` |
+| `-IdentityResourceGroup` | `--identity-resource-group` | 아니요 | UAMI를 둘 기존 RG, 기본 `safeaca-identity` |
 
 ### 검증 단계 (하나라도 실패하면 아무것도 만들지 않음)
 
@@ -150,13 +160,21 @@ Environment variables 를 설정합니다. **client secret은 생성하지 않�
 
 | 대상 | 생성/설정 내용 |
 | --- | --- |
-| Entra | app `safe-aca-<owner>-<repo>-<env>`, service principal, federated credential `github-<env>` |
+| Azure (identity RG) | UAMI `safe-aca-<owner>-<repo>-<env>`, federated credential `github-<env>` |
 | RBAC (`build`) | ACR scope `AcrPush`, `Reader` |
 | RBAC (지역) | Container App scope `Container Apps Contributor`, RG `Reader`, workspace `Log Analytics Reader` |
 | GitHub vars (공통) | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` |
 | GitHub vars (`build`) | `ACR_NAME` |
 | GitHub vars (지역) | `RESOURCE_GROUP`, `CONTAINER_APP`, `LOG_ANALYTICS_WORKSPACE_ID` |
-| 로컬 파일 | `state\identity-<env>.json`(app/client/principal ID), `state\oidc-<env>.json`(federated credential 정의) |
+| 로컬 파일 | `state\identity-<env>.json`(identity resource/client/principal ID), `state\oidc-<env>.json`(federated credential 정의) |
+
+### 기존 Entra 앱(service principal) 구성에서 전환
+
+1. `main` 에서 `oidc-inspect.yml` 을 실행해 claims를 새로 받습니다.
+2. 위 사용 예대로 7개 환경을 다시 실행합니다. 마지막 단계에서 `AZURE_CLIENT_ID` 가 UAMI로
+   바뀌므로, 그 전까지는 기존 앱으로 계속 배포됩니다.
+3. KR demo release로 로그인을 확인한 뒤, 기존 앱의 역할 할당을 제거하고 Entra 관리자에게
+   앱 등록 삭제를 요청합니다.
 
 ### 사용 예
 
@@ -195,6 +213,7 @@ scripts/configure-identity.sh --repository "$repo" --environment prod-kr \
 | `No environment trust context in inspected claims` | 저장소의 OIDC custom subject template 검토 |
 | `Claims IDs do not match current GitHub repository/owner` | 저장소 이름 변경/이전 후 claim 재수집 |
 | `Identity record exists: state\identity-<env>.json` | **파일을 지우지 말 것.** 기록된 ID로 누락된 RBAC/변수만 수동 보완 |
+| `AuthorizationFailed ... roleAssignments/write` | 역할 할당 권한이 있는 운영자가 실행. 이미 만들어진 UAMI·federated credential은 재실행 시 그대로 재사용되므로, 이 경우에만 `state\identity-<env>.json` 을 지우고 다시 실행 |
 | `Failed setting <NAME>; create/protect GitHub environment first` | GitHub Settings → Environments 에서 환경 생성 |
 
 ---

@@ -1032,6 +1032,44 @@ class SafetyTests(unittest.TestCase):
         self.assertIn("needs: southeastasia", release)
         self.assertNotIn("matrix:", release)
 
+    def test_korea_only_release_reuses_build_and_stops_after_korea(self):
+        workflows = ROOT / ".github" / "workflows"
+        release = (workflows / "release.yml").read_text()
+        quick = (workflows / "release-kr.yml").read_text()
+        build = (workflows / "build.yml").read_text()
+        for text in (release, quick):
+            self.assertIn("uses: ./.github/workflows/build.yml", text)
+            self.assertNotIn("docker build", text)
+        self.assertIn("group: safe-aca-production", quick)
+        self.assertIn("cancel-in-progress: false", quick)
+        self.assertIn("environment: prod-kr", quick)
+        self.assertNotIn("prod-sea", quick)
+        self.assertNotIn("prod-usw", quick)
+        self.assertIn("workflow_call:", build)
+        self.assertIn('test "$RUN_ATTEMPT" = "1"', build)
+        self.assertIn("python -m unittest discover", build)
+        self.assertIn("environment: build", build)
+
+    def run_check_source(self, path):
+        body = json.dumps({"repository": {"full_name": "owner/repo"}, "path": path,
+                           "event": "workflow_dispatch", "head_branch": "main",
+                           "status": "completed", "head_sha": "abc"}).encode()
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "out"
+            env = {"SOURCE_RUN_ID": "42", "GITHUB_REPOSITORY": "owner/repo", "GH_TOKEN": "t",
+                   "GITHUB_OUTPUT": str(output)}
+            with patch.dict(os.environ, env), \
+                    patch.object(urllib.request, "urlopen", return_value=io.BytesIO(body)):
+                import runpy
+                runpy.run_path(str(ROOT / "scripts" / "check_source.py"), run_name="__main__")
+            return output.read_text()
+
+    def test_check_source_accepts_both_release_workflows_only(self):
+        for path in (".github/workflows/release.yml", ".github/workflows/release-kr.yml"):
+            self.assertIn("sha=abc", self.run_check_source(path))
+        with self.assertRaisesRegex(RuntimeError, "release"):
+            self.run_check_source(".github/workflows/restore.yml")
+
     def test_business_function(self):
         self.assertTrue(server.business_result(0))
         self.assertFalse(server.business_result(100))

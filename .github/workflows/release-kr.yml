@@ -1,0 +1,38 @@
+name: Quick release - build then Korea only
+# For fast zero-downtime verification: same build, gates, canary, and evidence as
+# release.yml, but stops after Korea. SEA/USW are untouched, so regions may run
+# different versions afterwards; use release.yml to bring all regions in line.
+# demo-retire.yml and restore.yml (region=kr) accept these runs as source_run_id.
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: demo = educational synthetic short bake; production = 3 x 1h
+        type: choice
+        options: [demo, production]
+        default: demo
+permissions:
+  contents: read
+concurrency:
+  group: safe-aca-production
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/build.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      version_prefix: k
+  korea:
+    needs: build
+    uses: ./.github/workflows/region.yml
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    with:
+      region: kr
+      environment: prod-kr
+      profile: ${{ inputs.profile }}

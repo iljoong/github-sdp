@@ -1,0 +1,62 @@
+name: Build and push release image (reusable)
+# Shared by release.yml (kr -> sea -> usw) and release-kr.yml (kr only) so both
+# use the same rerun guard, tests, and immutable digest recording.
+on:
+  workflow_call:
+    inputs:
+      version_prefix:
+        description: APP_VERSION prefix shown by /verify (release.yml r<N>, release-kr.yml k<N>)
+        required: true
+        type: string
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment: build
+    timeout-minutes: 30
+    env:
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      ACR_NAME: ${{ vars.ACR_NAME }}
+      VERSION_PREFIX: ${{ inputs.version_prefix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Reject reruns and validate locally
+        env:
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          test "$RUN_ATTEMPT" = "1" || { echo "Deploy reruns forbidden; restore or start a new release"; exit 1; }
+          python -m unittest discover -s tests -v
+          python -m compileall -q app scripts tests
+      - uses: azure/login@8c334a195cbb38e46038007b304988d888bf676a
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Build and push once; record immutable digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$ACR_NAME" =~ ^[a-z0-9]{5,50}$ ]] || exit 1
+          [[ "$VERSION_PREFIX" =~ ^[a-z]{1,3}$ ]] || exit 1
+          server=$(az acr show -n "$ACR_NAME" --query loginServer -o tsv)
+          az acr login -n "$ACR_NAME"
+          tag="safe-demo:run-${GITHUB_RUN_ID}"
+          docker build --platform linux/amd64 --build-arg APP_VERSION="${VERSION_PREFIX}${GITHUB_RUN_NUMBER}" -t "$server/$tag" app
+          docker push "$server/$tag"
+          digest=$(az acr repository show -n "$ACR_NAME" --image "$tag" --query digest -o tsv)
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          export IMAGE="$server/safe-demo@$digest"
+          python -c 'import os; from scripts.common import save; save("release.json", {"image":os.environ["IMAGE"],"run_id":os.environ["GITHUB_RUN_ID"],"repository":os.environ["GITHUB_REPOSITORY"],"commit":os.environ["GITHUB_SHA"]})'
+          docker logout "$server"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ github.run_id }}
+          path: release.json
+          if-no-files-found: error
+          retention-days: 90

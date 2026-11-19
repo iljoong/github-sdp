@@ -63,7 +63,7 @@ SERVING ────────────────────────
 
 | 값 | 기본 | 설정 위치 | 설명 |
 | --- | --- | --- | --- |
-| `APP_VERSION` | `dev` | **이미지** (`app/Dockerfile` `ARG`, `release.yml` 이 `r<run 번호>`, bootstrap 이 `bootstrap`) | 화면의 큰 버전 글자. template env에 넣지 말 것(5.5) |
+| `APP_VERSION` | `dev` | **이미지** (`app/Dockerfile` `ARG`, `build.yml` 이 `release.yml` 은 `r<run 번호>`, `release-kr.yml` 은 `k<run 번호>`, bootstrap 이 `bootstrap`) | 화면의 큰 버전 글자. template env에 넣지 말 것(5.5) |
 | `terminationGracePeriodSeconds` | 180 | `infra/revision-policy.json` | ACA가 SIGTERM 후 SIGKILL까지 기다리는 시간 |
 | `GRACE_SECONDS` | 180 | candidate env (위 정책 값에서 자동 생성) | 앱이 deadline 계산과 화면 카운트다운에 사용 |
 | `LONG_TASK_SECONDS` | 120 | 앱 env (기본값은 `server.py`) | 긴 작업 길이. 자동 상한 적용(5.5) |
@@ -123,7 +123,7 @@ draining replica로 계속 라우팅되는지, 열려 있는 요청이 비활성
 | 시점 | 발표자 행동 | 화면에서 보이는 것 |
 | --- | --- | --- |
 | T0 | `https://<APP FQDN>/verify` 를 연다 | 큰 글자 v1(예: `r41`), 스트립이 v1 색으로 채워짐, v1 카드 `SERVING` |
-| T1 | `gh workflow run release.yml -f profile=demo` 후 kr 승인 | 10% → 50% → 100% 동안 스트립이 두 색으로 섞이다가 v2 색으로 바뀜. **오류 0** |
+| T1 | `gh workflow run release.yml -f profile=demo` 후 kr 승인 (빠르게: `gh workflow run release-kr.yml`, KR만) | 10% → 50% → 100% 동안 스트립이 두 색으로 섞이다가 v2 색으로 바뀜. **오류 0** |
 | T2 | release run이 **전체 완료**될 때까지 기다림 (sea, usw 승인 포함) | v2 카드 등장. v1 카드: 트래픽 0%, `SERVING`, ready ✓ |
 | T3 | v1 카드의 **"긴 작업 시작"** 클릭 | v1 카드에 진행 막대 `0s / 약 120s` |
 | T4 | 즉시 `demo-retire.yml` 실행 후 `prod-kr` 승인 (아래 명령) | — |
@@ -229,7 +229,7 @@ gh workflow run restore.yml --repo $repo --ref main -f source_run_id=<RELEASE_RU
 | probe 경로/타이밍 | `infra/health-probes.json` → 새 release | `tests/test_safety.py` probe 테스트 |
 | 화면 주기·색·창 크기 | `app/verify.html` 맨 위 `CONFIG` | — |
 | 카드 상태 규칙 | `verify.html` `pollStatus()` | 5.8 표 |
-| 버전 라벨 형식 | `.github/workflows/release.yml` `--build-arg APP_VERSION=` | `app/Dockerfile` `ARG` |
+| 버전 라벨 형식 | `.github/workflows/build.yml` `--build-arg APP_VERSION=`, 호출 측 `version_prefix` | `app/Dockerfile` `ARG` |
 | retire 안전 조건/대기 시간 | `scripts/retire.py` `retire(timeout=300, interval=5)` | `tests/test_safety.py` `test_retire_*` |
 | retire workflow 입력/승인 환경 | `.github/workflows/demo-retire.yml` | `test_region_workflows_are_sequential_and_share_restore_lock` |
 

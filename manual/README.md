@@ -48,6 +48,8 @@
 | 경로 | 역할 |
 | --- | --- |
 | `.github\workflows\release.yml` | 릴리스 진입점: build → kr → sea → usw 순차 배포 |
+| `.github\workflows\release-kr.yml` | 빠른 무중단 검증: build → kr 만 (버전 `k<N>`) |
+| `.github\workflows\build.yml` | 두 release가 공유하는 재사용 build (테스트, 이미지 push, digest 기록) |
 | `.github\workflows\region.yml` | 지역 1곳의 snapshot / rollout / cleanup / evidence 업로드 (재사용 workflow) |
 | `.github\workflows\restore.yml` | 수동 복구 진입점 (usw → sea → kr) |
 | `.github\workflows\restore-region.yml` | 지역 1곳의 복구 (재사용 workflow) |

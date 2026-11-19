@@ -14,9 +14,10 @@ request = urllib.request.Request(
              "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
 with urllib.request.urlopen(request, timeout=30) as response:
     value = json.load(response)
+RELEASE_WORKFLOWS = {".github/workflows/release.yml", ".github/workflows/release-kr.yml"}
 require(value["repository"]["full_name"] == repo, "Wrong source repository")
-require(value["path"] == ".github/workflows/release.yml" and value["event"] == "workflow_dispatch",
-        "Source must be a release.yml dispatch")
+require(value["path"] in RELEASE_WORKFLOWS and value["event"] == "workflow_dispatch",
+        "Source must be a release.yml or release-kr.yml dispatch")
 require(value["head_branch"] == "main" and value["status"] == "completed", "Source must be completed main run")
 with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
     stream.write(f'sha={value["head_sha"]}\n')

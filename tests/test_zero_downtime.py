@@ -312,8 +312,8 @@ class ArtifactTests(unittest.TestCase):
         self.assertIn("ARG APP_VERSION", dockerfile)
         self.assertIn("ENV APP_VERSION=$APP_VERSION", dockerfile)
         self.assertIn("verify.html", dockerfile)
-        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
-        self.assertIn("--build-arg APP_VERSION=", release)
+        build = (ROOT / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
+        self.assertIn("--build-arg APP_VERSION=", build)
         for script in ("bootstrap.sh", "bootstrap.ps1"):
             self.assertIn("--build-arg APP_VERSION=bootstrap",
                           (ROOT / "scripts" / script).read_text(encoding="utf-8"))

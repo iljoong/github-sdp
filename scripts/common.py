@@ -164,6 +164,9 @@ def verify_context(snapshot):
 
 def normalized_template(template):
     value = json.loads(json.dumps(template))
+    # Azure may report an unset grace period as null.
+    if "terminationGracePeriodSeconds" in value and value["terminationGracePeriodSeconds"] is None:
+        del value["terminationGracePeriodSeconds"]
     scale = value.get("scale", {})
     for key in ("cooldownPeriod", "pollingInterval"):
         if key in scale and scale[key] is None:
@@ -189,6 +192,12 @@ def expected_candidate(snapshot):
     container["image"] = snapshot["image"]
     env = [v for v in container.get("env", []) if v["name"] != "RELEASE_ID"]
     env.append({"name": "RELEASE_ID", "value": snapshot["run_id"]})
+    # Older recovery artifacts predate the explicit grace policy; keep the stable value.
+    if "candidate_termination_grace_seconds" in snapshot:
+        grace = snapshot["candidate_termination_grace_seconds"]
+        template["terminationGracePeriodSeconds"] = grace
+        env = [v for v in env if v["name"] != "GRACE_SECONDS"]
+        env.append({"name": "GRACE_SECONDS", "value": str(grace)})
     container["env"] = env
     # Older recovery artifacts predate the explicit candidate probe policy.
     if "candidate_probes" in snapshot:

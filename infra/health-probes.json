@@ -15,7 +15,7 @@
   {
     "type": "Readiness",
     "httpGet": {
-      "path": "/healthz",
+      "path": "/readyz",
       "port": 8080,
       "scheme": "HTTP"
     },

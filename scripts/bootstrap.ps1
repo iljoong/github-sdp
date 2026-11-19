@@ -55,7 +55,7 @@ Write-ProgressMessage "Logging in to ACR $AcrName."
 if ($LASTEXITCODE -ne 0) { throw 'ACR login failed' }
 $tag = "safe-demo:bootstrap-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
 Write-ProgressMessage "Building linux/amd64 bootstrap image: $server/$tag."
-& docker build --platform linux/amd64 -t "$server/$tag" app
+& docker build --platform linux/amd64 --build-arg APP_VERSION=bootstrap -t "$server/$tag" app
 if ($LASTEXITCODE -ne 0) { throw 'Docker build failed' }
 Write-ProgressMessage "Pushing bootstrap image: $server/$tag."
 & docker push "$server/$tag"

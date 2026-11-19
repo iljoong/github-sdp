@@ -1,0 +1,80 @@
+name: Demo - retire previous revision (one region)
+# Demo only. After a release has fully completed in a region (candidate at 100%),
+# deactivate the previous revision so it receives SIGTERM and drains in-flight
+# long tasks while /verify watches. Production releases keep it active on purpose.
+# See manual/05-zero-downtime-demo.md.
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Completed release run ID whose candidate now has 100% traffic
+        required: true
+        type: string
+      region:
+        description: One region only
+        required: true
+        type: choice
+        options: [kr, sea, usw]
+        default: kr
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+concurrency:
+  group: safe-aca-production
+  cancel-in-progress: false
+jobs:
+  retire:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment: prod-${{ inputs.region }}
+    timeout-minutes: 15
+    env:
+      REGION: ${{ inputs.region }}
+      SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      RESOURCE_GROUP: ${{ vars.RESOURCE_GROUP }}
+      CONTAINER_APP: ${{ vars.CONTAINER_APP }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Verify source is this repository's completed main release
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/check_source.py
+      - uses: actions/download-artifact@v4
+        with:
+          name: baseline-${{ inputs.source_run_id }}-${{ inputs.region }}
+          path: retire-input
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_run_id }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: evidence-${{ inputs.source_run_id }}-${{ inputs.region }}-1
+          path: retire-input/evidence
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_run_id }}
+      - name: Bind snapshot to verified source commit and run
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          python -c 'import os; from scripts.common import load, require; s=load("retire-input/baseline-"+os.environ["REGION"]+".json"); require(s["commit"]==os.environ["SOURCE_SHA"] and s["run_id"]==os.environ["SOURCE_RUN_ID"], "Wrong snapshot origin")'
+      - uses: azure/login@8c334a195cbb38e46038007b304988d888bf676a
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Guard drift; deactivate previous revision; verify candidate serves
+        run: python scripts/retire.py --snapshot "retire-input/baseline-$REGION.json" --success "retire-input/evidence/$REGION/success.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: demo-retire-evidence-${{ github.run_id }}-${{ inputs.region }}
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 90

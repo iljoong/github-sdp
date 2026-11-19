@@ -122,6 +122,20 @@ docker build --platform linux/amd64 -t safe-demo:local app
 docker run --rm -p 8080:8080 safe-demo:local
 ```
 
+### 무중단 종료(SIGTERM drain) 로컬 확인
+
+짧은 값으로 앱을 실행하고 브라우저에서 `http://localhost:8080/verify` 를 엽니다.
+
+```powershell
+$env:LONG_TASK_SECONDS = '20'; $env:GRACE_SECONDS = '40'
+python app\server.py
+```
+
+카드의 **긴 작업 시작**을 누른 뒤 서버 창에서 `Ctrl+C` 를 누릅니다. Windows에서는
+SIGINT가 SIGTERM과 같은 drain을 시작합니다. 기대 결과: 카드 `DRAINING`
+(`/readyz` 503) → 약 20초 뒤 `완료 … drainObserved: 예` → 약 2초 뒤 `STOPPED`, 서버 종료
+코드 0. 화면과 데모 절차는 [manual/05-zero-downtime-demo.md](manual/05-zero-downtime-demo.md)를 참고합니다.
+
 ## 4. 최초 Azure bootstrap
 
 PowerShell 스크립트는 provider 등록, 공유 인프라, 이미지 build/push, RBAC 대기,

@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import common
 import inspect_oidc
 import metrics
+import retire
 import rollout
 import snapshot as snapshot_script
 
@@ -82,7 +83,8 @@ class SafetyTests(unittest.TestCase):
                     "template": template()}}
                 with patch.dict(os.environ, environment), \
                      patch.object(snapshot_script.Path, "exists", return_value=False), \
-                     patch.object(snapshot_script, "load", return_value=release), \
+                     patch.object(snapshot_script, "load", side_effect=lambda path: (
+                         release if path == "release.json" else common.load(path))), \
                      patch.object(snapshot_script, "app", return_value=value), \
                      patch.object(snapshot_script, "revision", return_value=baseline), \
                      patch.object(snapshot_script, "az", return_value=[]), \
@@ -221,7 +223,8 @@ class SafetyTests(unittest.TestCase):
         probes = common.load(ROOT / "infra" / "health-probes.json")
         self.assertEqual([p["type"] for p in probes], ["Startup", "Readiness", "Liveness"])
         for probe in probes:
-            self.assertEqual(probe["httpGet"], {"path": "/healthz", "port": 8080, "scheme": "HTTP"})
+            expected_path = "/readyz" if probe["type"] == "Readiness" else "/healthz"
+            self.assertEqual(probe["httpGet"], {"path": expected_path, "port": 8080, "scheme": "HTTP"})
             self.assertEqual(probe["timeoutSeconds"], 5)
             self.assertGreaterEqual(probe["initialDelaySeconds"], 1)
             self.assertLessEqual(probe["initialDelaySeconds"], 60)
@@ -236,6 +239,47 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual((liveness["periodSeconds"], liveness["failureThreshold"]), (10, 3))
         self.assertIn("probes: loadJsonContent('./health-probes.json')",
                       (ROOT / "infra" / "region.bicep").read_text())
+
+    def test_grace_policy_file_is_valid(self):
+        grace = common.load(ROOT / "infra" / "revision-policy.json")["terminationGracePeriodSeconds"]
+        self.assertIsInstance(grace, int)
+        self.assertEqual(grace, 180)
+        self.assertTrue(1 <= grace <= 600)
+        self.assertIn("revision-policy.json", (ROOT / "infra" / "region.bicep").read_text())
+
+    def test_candidate_grace_override_and_legacy_snapshot(self):
+        s = snapshot()
+        s["candidate_termination_grace_seconds"] = 180
+        before = json.loads(json.dumps(s))
+        candidate = common.expected_candidate(s)
+        self.assertEqual(candidate["terminationGracePeriodSeconds"], 180)
+        self.assertEqual(candidate["containers"][0]["env"],
+                         [{"name": "GRACE_SECONDS", "value": "180"}, {"name": "RELEASE_ID", "value": "123"}])
+        self.assertEqual(s, before)
+        s["stable_template"]["containers"][0]["env"].append({"name": "GRACE_SECONDS", "value": "30"})
+        self.assertEqual(common.expected_candidate(s)["containers"][0]["env"],
+                         [{"name": "GRACE_SECONDS", "value": "180"}, {"name": "RELEASE_ID", "value": "123"}])
+        legacy = snapshot()
+        candidate = common.expected_candidate(legacy)
+        self.assertNotIn("terminationGracePeriodSeconds", candidate)
+        self.assertEqual(candidate["containers"][0]["env"], [{"name": "RELEASE_ID", "value": "123"}])
+
+    def test_null_grace_is_normalized(self):
+        self.assertEqual(common.normalized_template({"terminationGracePeriodSeconds": None, "containers": []}),
+                         {"containers": []})
+        self.assertEqual(common.normalized_template({"terminationGracePeriodSeconds": 30, "containers": []}),
+                         {"terminationGracePeriodSeconds": 30, "containers": []})
+
+    def test_candidate_grace_drift_is_rejected(self):
+        s = snapshot()
+        s["candidate_termination_grace_seconds"] = 180
+        candidate = common.expected_candidate(s)
+        with patch.object(common, "revision", return_value={
+                "name": s["candidate"], "properties": {"template": candidate}}):
+            common.candidate_owned(s)
+            candidate["terminationGracePeriodSeconds"] = 30
+            with self.assertRaisesRegex(RuntimeError, "Candidate template drift"):
+                common.candidate_owned(s)
 
     def test_candidate_probe_override_preserves_stable_and_legacy_recovery_templates(self):
         s = snapshot()
@@ -306,6 +350,7 @@ class SafetyTests(unittest.TestCase):
             snapshot_script.main()
         captured = save.call_args.args[1]
         self.assertEqual(captured["candidate_probes"], common.load(ROOT / "infra" / "health-probes.json"))
+        self.assertEqual(captured["candidate_termination_grace_seconds"], 180)
         self.assertEqual(captured["stable_template"], baseline)
         self.assertEqual(captured["stable_template_hash"], common.digest(baseline))
         self.assertEqual(baseline["containers"][0]["probes"][0]["timeoutSeconds"], 2)
@@ -900,12 +945,79 @@ class SafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "rollback"):
             rollout.cancelled(signal.SIGTERM, None)
 
+    def retire_run(self, success=None, ready=True, active=(True, False), drift=None, **kwargs):
+        s = snapshot()
+        states = iter(active)
+        current = {"properties": {"configuration": {"ingress": {"fqdn": "myapp.example"}}}}
+
+        def revision(name):
+            if name == s["stable"]:
+                return {"properties": {"active": next(states, active[-1])}}
+            return {"properties": {"active": True}}
+
+        guarded = patch.object(retire, "guarded_state", side_effect=drift,
+                               return_value=(current, {s["candidate"]: 100}))
+        with patch.dict(os.environ, {"SOURCE_RUN_ID": "123", "REGION": "kr",
+                                     "RESOURCE_GROUP": "group", "CONTAINER_APP": "myapp"}), \
+             patch.object(retire, "verify_context"), guarded as guard, \
+             patch.object(retire, "candidate_owned", return_value={"properties": {}}), \
+             patch.object(retire, "ready", return_value=ready), \
+             patch.object(retire, "revision", side_effect=revision), \
+             patch.object(retire, "az") as az, \
+             patch.object(retire, "request") as request, \
+             patch.object(retire, "save") as save, \
+             patch.object(retire.time, "sleep"), patch("builtins.print"):
+            try:
+                retire.retire(s, success or {"revision": s["candidate"]}, **kwargs)
+            finally:
+                self.calls = {"az": az, "request": request, "save": save, "guard": guard}
+
+    def test_retire_refuses_without_matching_success(self):
+        with self.assertRaisesRegex(RuntimeError, "success"):
+            self.retire_run(success={"revision": "other"})
+        self.calls["az"].assert_not_called()
+
+    def test_retire_refuses_on_drift(self):
+        with self.assertRaisesRegex(RuntimeError, "Traffic drift"):
+            self.retire_run(drift=RuntimeError("Traffic drift; refusing blind overwrite"))
+        self.calls["az"].assert_not_called()
+        self.calls["guard"].assert_called_once_with(snapshot(), {"myapp--r123": 100})
+
+    def test_retire_refuses_unready_candidate(self):
+        with self.assertRaisesRegex(RuntimeError, "Candidate"):
+            self.retire_run(ready=False)
+        self.calls["az"].assert_not_called()
+
+    def test_retire_deactivates_then_verifies(self):
+        self.retire_run()
+        self.calls["az"].assert_called_once()
+        args = self.calls["az"].call_args.args
+        self.assertIn("deactivate", args)
+        self.assertEqual(args[args.index("--revision") + 1], "myapp--old")
+        request_args = self.calls["request"].call_args.args
+        self.assertEqual((request_args[0], request_args[1], request_args[-1]),
+                         ("myapp.example", "/work", "myapp--r123"))
+        path, record = self.calls["save"].call_args.args
+        self.assertEqual(Path(path), Path("evidence") / "kr" / "demo-retire.json")
+        self.assertIs(record["verified"], True)
+        self.assertEqual((record["stable"], record["candidate"]), ("myapp--old", "myapp--r123"))
+
+    def test_retire_times_out_if_stable_stays_active(self):
+        with self.assertRaisesRegex(RuntimeError, "Stable still active"):
+            self.retire_run(active=(True,), timeout=0, interval=0)
+        self.calls["save"].assert_not_called()
+
     def test_region_workflows_are_sequential_and_share_restore_lock(self):
         release = (ROOT / ".github" / "workflows" / "release.yml").read_text()
         restore = (ROOT / ".github" / "workflows" / "restore.yml").read_text()
-        for text in (release, restore):
+        demo_retire = (ROOT / ".github" / "workflows" / "demo-retire.yml").read_text()
+        for text in (release, restore, demo_retire):
             self.assertIn("group: safe-aca-production", text)
             self.assertIn("cancel-in-progress: false", text)
+        self.assertIn("environment: prod-${{ inputs.region }}", demo_retire)
+        self.assertIn("check_source.py", demo_retire)
+        self.assertIn("scripts/retire.py", demo_retire)
+        self.assertNotIn("[all,", demo_retire)
         self.assertIn("needs: korea", release)
         self.assertIn("needs: southeastasia", release)
         self.assertNotIn("matrix:", release)

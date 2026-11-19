@@ -14,6 +14,9 @@ param image string
 param acrServer string
 param pullIdentityId string
 
+// Same policy file that snapshot.py freezes for every candidate revision.
+var revisionPolicy = loadJsonContent('./revision-policy.json')
+
 resource workspace 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   name: '${appName}-logs'
   location: location
@@ -88,6 +91,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
     }
     template: {
       revisionSuffix: 'bootstrap'
+      terminationGracePeriodSeconds: revisionPolicy.terminationGracePeriodSeconds
       containers: [
         {
           name: 'web'
@@ -96,6 +100,10 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
             {
               name: 'RELEASE_ID'
               value: 'bootstrap'
+            }
+            {
+              name: 'GRACE_SECONDS'
+              value: string(revisionPolicy.terminationGracePeriodSeconds)
             }
           ]
           resources: {

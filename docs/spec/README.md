@@ -30,6 +30,7 @@ unchanged.
 | --- | --- | --- |
 | [Expedited patch deployment](expedited-patch.md) | Draft; explicit 0% to 100% mode without bake windows, not implemented | Approved eligibility, input, verification, and authorization policy |
 | [Guarded revision cleanup](revision-cleanup.md) | Draft; separate manual dry-run-first deactivation workflow, not implemented | Approved retention, durable protection inventory, and mutation policy |
+| [Zero-downtime demo app](zero-downtime-demo-app.md) | Approved 2026-11-19; implemented (readiness/SIGTERM drain, `/verify`, long task, demo retire); ACA spike ZDD-R00 and end-to-end ZDD-R07 not run | Operator runs ZDD-R00 in nonproduction before the first live demo |
 
 These specifications are not new numbered phases and do not implicitly approve
 Phases 2/3. Each records existing evidence, proposed requirements, decisions, and

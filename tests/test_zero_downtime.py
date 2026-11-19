@@ -285,5 +285,25 @@ class ProcessSignalTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 6)
 
 
+class ArtifactTests(unittest.TestCase):
+    def test_verify_page_declares_tunables_and_endpoints(self):
+        page = (ROOT / "app" / "verify.html").read_text(encoding="utf-8")
+        for needle in ("POLL_INTERVAL_MS: 1000", "REQUEST_TIMEOUT_MS", "/api/version",
+                       "/status", "/api/long-task", "긴 작업 시작"):
+            self.assertIn(needle, page)
+
+    def test_dockerfile_bakes_version_and_page(self):
+        dockerfile = (ROOT / "app" / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("ARG APP_VERSION", dockerfile)
+        self.assertIn("ENV APP_VERSION=$APP_VERSION", dockerfile)
+        self.assertIn("verify.html", dockerfile)
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        self.assertIn("--build-arg APP_VERSION=", release)
+        for script in ("bootstrap.sh", "bootstrap.ps1"):
+            self.assertIn("--build-arg APP_VERSION=bootstrap",
+                          (ROOT / "scripts" / script).read_text(encoding="utf-8"))
+        self.assertNotIn("APP_VERSION", (ROOT / "infra" / "region.bicep").read_text(encoding="utf-8"))
+
+
 if __name__ == "__main__":
     unittest.main()

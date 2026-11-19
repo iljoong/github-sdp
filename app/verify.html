@@ -1,3 +1,306 @@
 <!doctype html>
-<!-- placeholder replaced in Task 4; POLL_INTERVAL_MS -->
-<title>verify</title>
+<!--
+  무중단 배포 검증 페이지 (/verify). 단일 파일, 외부 의존성 없음.
+  - 상단: 1초마다 GET <base>/api/version → 큰 버전 표시 + 1초 단위 스트립 + 카운터
+  - 하단: 관찰된 revision마다 카드. 각 카드는 1초마다 GET <revisionUrl>/status 를 폴링하고
+          "긴 작업 시작" 버튼으로 POST <revisionUrl>/api/long-task 를 보낸다.
+  조정 값은 <script> 맨 위의 CONFIG 한 곳에만 있다. 설계: docs/spec/zero-downtime-demo-app.md §5
+  쿼리 파라미터: ?base=https://<app>.<env-dns-suffix> (다른 origin의 앱을 볼 때; 서버가 CORS 허용)
+-->
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>무중단 배포 검증</title>
+<style>
+  :root { --bg:#0f172a; --panel:#1e293b; --text:#e2e8f0; --muted:#94a3b8; --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:20px; font:14px/1.4 system-ui, "Segoe UI", "Malgun Gothic", sans-serif; background:var(--bg); color:var(--text); }
+  h1 { font-size:16px; margin:0 0 12px; color:var(--muted); font-weight:500; }
+  .panel { background:var(--panel); border-radius:10px; padding:16px; margin-bottom:16px; }
+  #hero { display:flex; align-items:baseline; gap:24px; flex-wrap:wrap; }
+  #version { font-size:64px; font-weight:700; letter-spacing:1px; }
+  #hero .meta { color:var(--muted); }
+  #hero .meta b { color:var(--text); font-weight:600; }
+  #strip { display:grid; grid-auto-flow:column; gap:2px; height:28px; margin:14px 0 8px; }
+  #strip div { border-radius:2px; background:#334155; }
+  #strip div.pending { background:#64748b; }
+  #legend { display:flex; gap:14px; flex-wrap:wrap; color:var(--muted); font-size:12px; }
+  #legend span::before { content:""; display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; background:var(--c); vertical-align:-1px; }
+  #counters { display:flex; gap:28px; margin-top:10px; font-size:15px; }
+  #counters b { font-size:20px; }
+  #cards { display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:16px; }
+  .card { background:var(--panel); border-radius:10px; padding:14px; border-top:6px solid var(--c); }
+  .card .title { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  .card .rev { font-weight:600; word-break:break-all; }
+  .badge { padding:2px 8px; border-radius:999px; font-size:12px; font-weight:700; color:#0f172a; background:var(--muted); white-space:nowrap; }
+  .badge.SERVING { background:var(--ok); } .badge.DRAINING { background:var(--warn); }
+  .badge.STOPPED { background:#64748b; color:var(--text); } .badge.UNREACHABLE { background:var(--bad); color:#fff; }
+  .card dl { display:grid; grid-template-columns:auto 1fr; gap:3px 12px; margin:10px 0; }
+  .card dt { color:var(--muted); } .card dd { margin:0; word-break:break-all; }
+  button { background:#3b82f6; color:#fff; border:0; border-radius:6px; padding:7px 12px; font:inherit; cursor:pointer; }
+  button:disabled { background:#475569; cursor:not-allowed; }
+  .task { margin-top:8px; font-size:13px; }
+  .bar { height:8px; background:#334155; border-radius:4px; overflow:hidden; margin-top:3px; }
+  .bar > div { height:100%; width:0; background:#3b82f6; transition:width .3s linear; }
+  .task.done .bar > div { background:var(--ok); } .task.failed .bar > div { background:var(--bad); }
+  .muted { color:var(--muted); font-size:12px; }
+</style>
+</head>
+<body>
+<h1>무중단 배포 검증 — <span id="base"></span></h1>
+
+<section class="panel">
+  <div id="hero">
+    <div id="version">—</div>
+    <div class="meta">revision <b id="revision">—</b><br>replica <b id="replica">—</b> · 응답 <b id="latency">—</b></div>
+  </div>
+  <div id="strip" title="1칸 = 1초. 색 = 응답한 버전, 빨강 = 오류, 회색 = 이전 요청 대기 중"></div>
+  <div id="legend"></div>
+  <div id="counters">
+    <div>성공 <b id="ok">0</b></div>
+    <div>오류 <b id="err" style="color:var(--bad)">0</b></div>
+    <div>연속 성공 <b id="streak">0</b></div>
+    <div class="muted" id="lastError"></div>
+  </div>
+</section>
+
+<section id="cards"></section>
+
+<script>
+// ===== 조정 가능한 값 (데모 환경에 맞게 여기만 수정) ===========================
+const CONFIG = {
+  POLL_INTERVAL_MS: 1000,      // /api/version, /status 폴링 주기
+  REQUEST_TIMEOUT_MS: 3000,    // 이보다 오래 걸리면 오류(빨강)로 처리
+  STRIP_CELLS: 120,            // 스트립에 보이는 칸 수 (= 최근 N초)
+  TRAFFIC_WINDOW_S: 30,        // 카드의 "트래픽 비율" 계산 구간
+  CARD_STATE_WINDOW_S: 3,      // 카드 상태 = 최근 N초 중 가장 나쁜 상태 (DRAINING > SERVING)
+  DEFAULT_LONG_TASK_S: 120,    // /status 의 longTaskSeconds 를 받기 전 진행률 기준
+  PALETTE: ["#3b82f6", "#a855f7", "#14b8a6", "#eab308", "#ec4899", "#f97316"],
+  ERROR_COLOR: "#ef4444",
+};
+// ==========================================================================
+
+const params = new URLSearchParams(location.search);
+const BASE = (params.get("base") || location.origin).replace(/\/+$/, "");
+const $ = (id) => document.getElementById(id);
+const now = () => Date.now() / 1000;
+
+const versionColors = new Map();          // version -> color (처음 본 순서)
+const revisions = new Map();              // revision -> card state
+const traffic = [];                       // [{t, revision}] 최근 성공 응답
+const cells = [];                         // 스트립 칸 [{color, cls, title}]
+const counters = { ok: 0, err: 0, streak: 0 };
+let versionInFlight = false;
+
+function colorFor(version) {
+  if (!versionColors.has(version)) {
+    versionColors.set(version, CONFIG.PALETTE[versionColors.size % CONFIG.PALETTE.length]);
+    renderLegend();
+  }
+  return versionColors.get(version);
+}
+
+async function fetchJson(url, options = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? CONFIG.REQUEST_TIMEOUT_MS);
+  const started = performance.now();
+  try {
+    const response = await fetch(url, { cache: "no-store", ...options, signal: controller.signal });
+    const text = await response.text();
+    let body = null;
+    try { body = JSON.parse(text); } catch { /* body stays null */ }
+    return { status: response.status, body, ms: Math.round(performance.now() - started) };
+  } catch (error) {
+    return { status: 0, body: null, ms: Math.round(performance.now() - started),
+             error: error.name === "AbortError" ? "timeout" : "network" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ---- 상단: /api/version ---------------------------------------------------
+function pushCell(cell) {
+  cells.push(cell);
+  while (cells.length > CONFIG.STRIP_CELLS) cells.shift();
+  const strip = $("strip");
+  strip.style.gridTemplateColumns = `repeat(${CONFIG.STRIP_CELLS}, 1fr)`;
+  while (strip.children.length < CONFIG.STRIP_CELLS) strip.appendChild(document.createElement("div"));
+  const offset = CONFIG.STRIP_CELLS - cells.length;
+  [...strip.children].forEach((el, i) => {
+    const c = cells[i - offset];
+    el.className = c?.cls || "";
+    el.style.background = c?.color || "";
+    el.title = c?.title || "";
+  });
+}
+
+async function pollVersion() {
+  if (versionInFlight) {           // 이전 요청이 아직 열려 있음: 겹쳐 보내지 않고 회색 칸
+    pushCell({ cls: "pending", title: `${new Date().toLocaleTimeString()} 이전 요청 대기 중` });
+    return;
+  }
+  versionInFlight = true;
+  const stamp = new Date().toLocaleTimeString();
+  const r = await fetchJson(`${BASE}/api/version`);
+  versionInFlight = false;
+  const b = r.body;
+  if (r.status === 200 && b && typeof b.version === "string") {
+    counters.ok++; counters.streak++;
+    $("version").textContent = b.version;
+    $("version").style.color = colorFor(b.version);
+    $("revision").textContent = b.revision;
+    $("replica").textContent = b.replica;
+    $("latency").textContent = `${r.ms} ms`;
+    traffic.push({ t: now(), revision: b.revision });
+    ensureCard(b.revision, b.version, b.dnsSuffix);
+    pushCell({ color: colorFor(b.version), title: `${stamp} ${b.version} ${b.revision} ${r.ms}ms` });
+  } else {
+    const reason = r.error || (b ? `HTTP ${r.status}` : `HTTP ${r.status} (JSON 아님)`);
+    counters.err++; counters.streak = 0;
+    $("lastError").textContent = `마지막 오류 ${stamp}: ${reason}`;
+    pushCell({ color: CONFIG.ERROR_COLOR, title: `${stamp} 오류: ${reason}` });
+  }
+  $("ok").textContent = counters.ok;
+  $("err").textContent = counters.err;
+  $("streak").textContent = counters.streak;
+}
+
+function renderLegend() {
+  const legend = $("legend");
+  legend.replaceChildren();
+  for (const [version, color] of versionColors) {
+    const span = document.createElement("span");
+    span.style.setProperty("--c", color);
+    span.textContent = version;
+    legend.appendChild(span);
+  }
+  const err = document.createElement("span");
+  err.style.setProperty("--c", CONFIG.ERROR_COLOR);
+  err.textContent = "오류";
+  legend.appendChild(err);
+}
+
+// ---- 하단: revision 카드 (/status, 긴 작업) --------------------------------
+function revisionUrl(revision, dnsSuffix) {
+  // ACA: 각 revision 은 https://<revision>.<env-dns-suffix> 로 직접 호출 가능. 로컬은 BASE.
+  return dnsSuffix ? `https://${revision}.${dnsSuffix}` : BASE;
+}
+
+function field(dl, label) {
+  const dt = document.createElement("dt"); dt.textContent = label;
+  const dd = document.createElement("dd"); dd.textContent = "—";
+  dl.append(dt, dd);
+  return dd;
+}
+
+function ensureCard(revision, version, dnsSuffix) {
+  if (revisions.has(revision)) return;
+  const el = document.createElement("article");
+  el.className = "card";
+  el.style.setProperty("--c", colorFor(version));
+  const title = document.createElement("div"); title.className = "title";
+  const name = document.createElement("div"); name.className = "rev"; name.textContent = `${version} · ${revision}`;
+  const badge = document.createElement("span"); badge.className = "badge"; badge.textContent = "…";
+  title.append(name, badge);
+  const dl = document.createElement("dl");
+  const card = {
+    revision, version, url: revisionUrl(revision, dnsSuffix), el, badge,
+    share: field(dl, "트래픽 비율"), ready: field(dl, "ready"), grace: field(dl, "grace 남음"),
+    replica: field(dl, "replica"), endpoint: field(dl, "주소"),
+    history: [], lastKnown: null, longTaskSeconds: CONFIG.DEFAULT_LONG_TASK_S, inFlight: false,
+  };
+  card.endpoint.textContent = card.url;
+  const button = document.createElement("button");
+  button.textContent = "긴 작업 시작";
+  button.onclick = () => startLongTask(card);
+  const tasks = document.createElement("div");
+  card.button = button; card.tasks = tasks;
+  el.append(title, dl, button, tasks);
+  $("cards").appendChild(el);
+  revisions.set(revision, card);
+}
+
+async function pollStatus(card) {
+  if (card.inFlight) return;
+  card.inFlight = true;
+  const r = await fetchJson(`${card.url}/status`);
+  card.inFlight = false;
+  const t = now();
+  if (r.status === 200 && r.body && r.body.state) {
+    const s = r.body;
+    card.lastKnown = s.state;
+    card.history.push({ t, state: s.state });
+    card.longTaskSeconds = s.longTaskSeconds || card.longTaskSeconds;
+    card.ready.textContent = s.ready ? "✓" : "✗";
+    card.grace.textContent = s.graceRemaining == null ? `— (grace ${s.graceSeconds}s)` : `${s.graceRemaining}s`;
+    card.replica.textContent = `${s.replica} · 진행 중 작업 ${s.inflight.length}개 (이 replica 기준)`;
+  } else {
+    // 응답 없음: 직전에 DRAINING/STOPPED 였다면 정상 종료(STOPPED), 아니면 UNREACHABLE. 스트립은 빨강으로 만들지 않는다.
+    const state = card.lastKnown === "DRAINING" || card.lastKnown === "STOPPED" ? "STOPPED" : "UNREACHABLE";
+    card.lastKnown = state === "STOPPED" ? "STOPPED" : card.lastKnown;
+    card.history.push({ t, state });
+    card.ready.textContent = "✗";
+    card.grace.textContent = "—";
+  }
+  card.history = card.history.filter((h) => h.t > t - CONFIG.CARD_STATE_WINDOW_S);
+  const rank = { SERVING: 0, DRAINING: 1, STOPPED: 2, UNREACHABLE: 3 };
+  const latest = card.history[card.history.length - 1].state;
+  // 응답이 있는 동안은 최근 N초 중 가장 나쁜 상태 (깜빡이는 DRAINING 도 놓치지 않음). 응답이 없으면 최신 상태.
+  const shown = rank[latest] >= 2 ? latest
+    : card.history.reduce((worst, h) => (rank[h.state] < 2 && rank[h.state] > rank[worst] ? h.state : worst), "SERVING");
+  card.badge.className = `badge ${shown}`;
+  card.badge.textContent = shown;
+}
+
+function renderShares() {
+  const since = now() - CONFIG.TRAFFIC_WINDOW_S;
+  while (traffic.length && traffic[0].t < since) traffic.shift();
+  for (const card of revisions.values()) {
+    const hits = traffic.filter((x) => x.revision === card.revision).length;
+    card.share.textContent = traffic.length
+      ? `${Math.round((hits * 100) / traffic.length)}% (최근 ${CONFIG.TRAFFIC_WINDOW_S}초 ${hits}/${traffic.length})`
+      : "—";
+  }
+}
+
+async function startLongTask(card) {
+  const row = document.createElement("div"); row.className = "task";
+  const label = document.createElement("div");
+  const bar = document.createElement("div"); bar.className = "bar";
+  const fill = document.createElement("div"); bar.appendChild(fill);
+  row.append(label, bar);
+  card.tasks.prepend(row);
+  const expected = card.longTaskSeconds;
+  const started = now();
+  const tick = setInterval(() => {
+    const elapsed = now() - started;
+    fill.style.width = `${Math.min(99, (elapsed * 100) / expected)}%`;
+    label.textContent = `긴 작업 진행 중… ${Math.floor(elapsed)}s / 약 ${expected}s`;
+  }, 500);
+  // 서버 작업 시간 + grace 여유보다 길게 기다린다 (draining 중에도 응답이 와야 성공).
+  const r = await fetchJson(`${card.url}/api/long-task`, { method: "POST", timeoutMs: (expected + 60) * 1000 });
+  clearInterval(tick);
+  const took = Math.round(now() - started);
+  fill.style.width = "100%";
+  if (r.status === 200 && r.body && r.body.completed) {
+    row.classList.add("done");
+    label.textContent = `완료 ${took}s · ${r.body.replica} · drainObserved: ${r.body.drainObserved ? "예 (종료 신호 중에도 끝까지 처리)" : "아니오"}`;
+  } else {
+    row.classList.add("failed");
+    const reason = r.error || (r.body && r.body.error) || `HTTP ${r.status}`;
+    label.textContent = `실패 ${took}s · ${reason}`;
+  }
+}
+
+$("base").textContent = BASE;
+renderLegend();
+setInterval(() => {
+  pollVersion();
+  for (const card of revisions.values()) pollStatus(card);
+  renderShares();
+}, CONFIG.POLL_INTERVAL_MS);
+pollVersion();
+</script>
+</body>
+</html>

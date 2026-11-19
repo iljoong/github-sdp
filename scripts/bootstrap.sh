@@ -111,7 +111,7 @@ progress "Logging in to ACR $acr_name."
 az acr login --name "$acr_name" --only-show-errors
 tag="safe-demo:bootstrap-$(date -u +%s)"
 progress "Building linux/amd64 bootstrap image: ${server}/${tag}."
-docker build --platform linux/amd64 -t "${server}/${tag}" app
+docker build --platform linux/amd64 --build-arg APP_VERSION=bootstrap -t "${server}/${tag}" app
 progress "Pushing bootstrap image: ${server}/${tag}."
 docker push "${server}/${tag}"
 progress "Resolving immutable image digest."

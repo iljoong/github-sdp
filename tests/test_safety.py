@@ -253,7 +253,7 @@ class SafetyTests(unittest.TestCase):
     def test_grace_policy_file_is_valid(self):
         grace = common.load(ROOT / "infra" / "revision-policy.json")["terminationGracePeriodSeconds"]
         self.assertIsInstance(grace, int)
-        self.assertEqual(grace, 180)
+        self.assertEqual(grace, 30)
         self.assertTrue(1 <= grace <= 600)
         self.assertIn("revision-policy.json", (ROOT / "infra" / "region.bicep").read_text())
 
@@ -360,7 +360,7 @@ class SafetyTests(unittest.TestCase):
             snapshot_script.main()
         captured = save.call_args.args[1]
         self.assertEqual(captured["candidate_probes"], common.load(ROOT / "infra" / "health-probes.json"))
-        self.assertEqual(captured["candidate_termination_grace_seconds"], 180)
+        self.assertEqual(captured["candidate_termination_grace_seconds"], 30)
         self.assertEqual(captured["stable_template"], baseline)
         self.assertEqual(captured["stable_template_hash"], common.digest(baseline))
         self.assertEqual(baseline["containers"][0]["probes"][0]["timeoutSeconds"], 2)

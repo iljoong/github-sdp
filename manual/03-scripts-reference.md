@@ -262,7 +262,7 @@ gh run download <inspectRun> --repo $repo -D state\oidc-claims
 
 - 작업 디렉터리의 `release.json` (build job artifact)
 - `infra\health-probes.json` (candidate에 적용할 probe 정책: Startup/Liveness `/healthz`, Readiness `/readyz`)
-- `infra\revision-policy.json` (candidate의 `terminationGracePeriodSeconds`, 기본 180)
+- `infra\revision-policy.json` (candidate의 `terminationGracePeriodSeconds`, 기본 30)
 - 환경 변수: `GITHUB_RUN_ATTEMPT`, `GITHUB_RUN_ID`, `GITHUB_REPOSITORY`, `GITHUB_SHA`,
   `REGION`, `AZURE_SUBSCRIPTION_ID`, `RESOURCE_GROUP`, `CONTAINER_APP`
 

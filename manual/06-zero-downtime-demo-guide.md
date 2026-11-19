@@ -20,7 +20,7 @@
 | --- | --- | --- |
 | liveness vs readiness | `/healthz`(프로세스 살아 있음) / `/readyz`(새 요청 받을 수 있음) 분리 | drain 중에는 ready=✗ 로 새 트래픽만 빼고, 살아 있으므로 재시작되지 않음 |
 | SIGTERM 처리 | 신호 핸들러는 플래그만 세움 → 메인 루프가 `DRAINING` 전환 → 진행 중 작업 종료 후 exit 0 | 신호 핸들러에서 lock을 잡으면 교착(deadlock) 위험. 실제로 이 버그를 테스트로 잡고 수정함 |
-| 종료 유예 | `terminationGracePeriodSeconds = 180` (`infra/revision-policy.json`) | 기본 30초로는 2분 작업이 SIGKILL 됨 |
+| 종료 유예 | `terminationGracePeriodSeconds = 30` (`infra/revision-policy.json`, ACA 기본값) | 앱 `GRACE_SECONDS` 도 30으로 맞추고 긴 작업을 15초로 자동 제한해 SIGKILL 전에 끝냄. 더 긴 작업은 grace를 올리거나 `LONG_TASK_ABORT_ON_DRAIN=Y` 로 즉시 응답 |
 | 앱 측 상한 | 긴 작업 ≤ `min(LONG_TASK_SECONDS, GRACE − MARGIN − 5, 230)` | ACA ingress 요청 timeout 240초, SIGKILL 전 여유 |
 | 점진적 전환 | canary 0 → 10 → 50 → 100% (quick 프로필: 0 → 50 → 100%), 단계별 bake + Log Analytics health gate | 문제를 일부 트래픽에서 먼저 발견, 실패 시 자동 복구 |
 | 이전 revision 유지 | 운영 release는 이전 revision을 **활성 상태로 남김** | 즉시 restore 가능. 그래서 데모에서는 `demo-retire.yml` 로 따로 SIGTERM을 발생시킴 |
@@ -61,7 +61,7 @@ curl.exe -s -o NUL -w "%{http_code}`n" https://<APP FQDN>/healthz   # 200 확인
 
 ```powershell
 az containerapp show -g safeaca-kr -n safeaca-kr-app --query "{grace:properties.template.terminationGracePeriodSeconds, probes:properties.template.containers[0].probes[].{t:type,p:httpGet.path}}" -o json
-# grace: 180, Readiness: /readyz, Liveness/Startup: /healthz
+# grace: 30, Readiness: /readyz, Liveness/Startup: /healthz
 curl.exe -s https://<APP FQDN>/api/version   # version, revision, dnsSuffix 필드가 있어야 함
 ```
 
@@ -87,10 +87,10 @@ curl.exe -s https://<APP FQDN>/api/version   # version, revision, dnsSuffix 필�
 | 1 | `gh workflow run release.yml --repo <repo> --ref main -f profile=demo` | build 성공 후 `prod-kr` 승인 대기 |
 | 2 | Actions → run → **Review deployments** → `prod-kr` 승인 | 10% → 50% → 100% 동안 스트립 두 색 혼합 → v2 색. **오류 0** |
 | 3 | `prod-sea`, `prod-usw` 도 승인하고 **run 전체 완료**까지 대기 | v2 카드 등장, v1 카드 트래픽 0%·`SERVING` |
-| 4 | v1 카드 **"긴 작업 시작"** 클릭 (또는 6.4-C curl로 v1 revision FQDN 호출) | 진행 막대 `0s / 약 120s` |
+| 4 | v1 카드 **"긴 작업 시작"** 클릭 (또는 6.4-C curl로 v1 revision FQDN 호출) | 진행 막대 `0s / 약 15s` (15초라 retire job 시작을 보고 누르거나 여러 번 클릭) |
 | 5 | 바로 retire 실행 후 `prod-kr` 승인 (아래) | — |
-| 6 | deactivate → v1 replica SIGTERM | v1 카드 `DRAINING`, ready ✗, grace 180s부터 감소 |
-| 7 | 약 120초 후 | `완료 … drainObserved: 예`, 약 2초 뒤 v1 카드 `STOPPED` |
+| 6 | deactivate → v1 replica SIGTERM | v1 카드 `DRAINING`, ready ✗, grace 30s부터 감소 |
+| 7 | 작업 종료 시 | `완료 … task_completed · drainObserved: 예` (`LONG_TASK_ABORT_ON_DRAIN=Y` 면 즉시 `중단 응답 … task_incompleted`), 약 2초 뒤 v1 카드 `STOPPED` |
 | 8 | 결과 정리 | 스트립에 빨강 없음, 오류 카운터 0 |
 
 ### retire 명령 상세
@@ -225,7 +225,7 @@ gh run watch "$retire" --repo "$repo" --exit-status
 | 판정 | 조건 |
 | --- | --- |
 | 무중단 배포 성공 | 상단 오류 카운터 0, 스트립에 빨강 칸 없음 |
-| SIGTERM 안전 처리 성공 | 긴 작업 `완료 … drainObserved: 예`, 이후 카드 `STOPPED` |
+| SIGTERM 안전 처리 성공 | 긴 작업 `완료 … task_completed · drainObserved: 예` (또는 abort 옵션 시 `task_incompleted`), 이후 카드 `STOPPED` |
 | 확인 필요 | `DRAINING` 없이 바로 `UNREACHABLE`, 또는 긴 작업 `실패 … network` (5.9절) |
 
 ### B. 터미널 폴링 (화면 없이 오류 수 측정)
@@ -262,7 +262,7 @@ release 동안 `err` 가 0으로 유지되고 버전이 v1 → (혼합) → v2 �
 
 ### C. 긴 작업 직접 호출 (curl)
 
-요청 body는 필요 없습니다. 작업이 기본 120초이므로 timeout(`-m`)을 240으로 둡니다.
+요청 body는 필요 없습니다. grace 30에서는 작업이 15초로 제한되지만, grace를 올린 환경(최대 230초)도 고려해 timeout(`-m`)을 240으로 둡니다.
 Windows에서는 `curl.exe` 를 명시합니다(PowerShell의 `curl` 별칭 회피).
 
 ```powershell
@@ -281,13 +281,14 @@ curl.exe -s https://<revision FQDN>/status
 
 | 상황 | HTTP | 응답 |
 | --- | --- | --- |
-| 정상 완료 | 200 | `{"completed":true,"drainObserved":false,"durationMs":120004,…}` |
-| 작업 중 SIGTERM, 끝까지 처리 | 200 | `"drainObserved":true` ← **핵심 증거** |
+| 정상 완료 | 200 | `{"completed":true,"result":"task_completed","drainObserved":false,"durationMs":15003,…}` |
+| 작업 중 SIGTERM, 끝까지 처리 (기본, `LONG_TASK_ABORT_ON_DRAIN` 미설정/`N`) | 200 | `"result":"task_completed","drainObserved":true` ← **핵심 증거** |
+| 작업 중 SIGTERM, 즉시 응답 (`LONG_TASK_ABORT_ON_DRAIN=Y`) | 200 | `"completed":false,"result":"task_incompleted","drainObserved":true` (drain 후 0.2초 이내) |
 | DRAINING 중인 revision에 새 요청 | 503 | `{"error":"draining"}` |
 | replica당 동시 3개 초과 | 429 | `{"error":"too many long tasks"}` |
 
 데모 변형: 터미널 1에서 v1 revision FQDN으로 위 curl 실행 → 터미널 2에서 retire 실행 →
-약 120초 후 터미널 1에 `HTTP 200` + `"drainObserved":true`.
+작업 종료 시 터미널 1에 `HTTP 200` + `"drainObserved":true` (`result` 로 완료/중단 구분).
 
 ### D. Azure CLI로 revision 상태 확인
 
@@ -311,7 +312,7 @@ ContainerAppConsoleLogs_CL
 | where TimeGenerated > ago(2h)
 | extend d = parse_json(Log_s)
 | where tostring(d.kind) in ('lifecycle', 'long_task')
-| project TimeGenerated, RevisionName_s, logKind = tostring(d.kind), logEvent = tostring(d.event), drainObserved = tostring(d.drainObserved)
+| project TimeGenerated, RevisionName_s, logKind = tostring(d.kind), logEvent = tostring(d.event), drainObserved = tostring(d.drainObserved), result = tostring(d.result)
 | order by TimeGenerated asc
 '@ -replace "`r?`n", ' '
 az monitor log-analytics query -w $ws --analytics-query $q -o table
@@ -321,8 +322,8 @@ az monitor log-analytics query -w $ws --analytics-query $q -o table
 > 열 이름에 `kind` 처럼 KQL 예약어를 쓰면 `SYN0002` 구문 오류가 납니다(`logKind` 사용).
 > Portal에서는 Log Analytics 작업 영역 → **로그** 에 같은 쿼리를 붙여 넣으면 됩니다.
 
-기대 순서(v1): `long_task start` → `lifecycle draining` → `long_task finish (drainObserved=true)` → `lifecycle stopped`.
-로그 수집은 수 분 지연될 수 있습니다. 실습 실제 결과(UTC, v1 = `r44452501783`):
+기대 순서(v1): `long_task start` → `lifecycle draining` → `long_task finish (drainObserved=true, result)` → `lifecycle stopped`.
+로그 수집은 수 분 지연될 수 있습니다. 아래는 grace 180 / 작업 120초 시절의 실습 기록입니다(UTC, v1 = `r44452501783`, `result` 필드 도입 전):
 
 ```text
 05:06:49.8  long_task  start
@@ -331,7 +332,44 @@ az monitor log-analytics query -w $ws --analytics-query $q -o table
 05:08:52.7  lifecycle  stopped         ← 작업 종료 후 약 3초 만에 정상 종료 (grace 180초 이내)
 ```
 
-### F. 단위 테스트 (코드 수정 시)
+### F. 수동 deactivate 실험 (grace / abort 검증)
+
+파이프라인 없이 0% 트래픽 테스트 revision을 만들어 SIGTERM 타이밍을 정확히 재현합니다.
+`<APP>.yaml` 은 `az containerapp show -o yaml` 결과에서 `properties.template` 만 남기고
+`revisionSuffix`, `terminationGracePeriodSeconds`, env를 바꾼 파일입니다.
+
+```powershell
+# 1) 테스트 revision 생성 (Multiple 모드라 트래픽 0%로 추가됨)
+az containerapp update -g safeaca-kr -n safeaca-kr-app --yaml ztest.yaml
+$fqdn = az containerapp revision show -g safeaca-kr -n safeaca-kr-app --revision safeaca-kr-app--ztest --query properties.fqdn -o tsv
+
+# 2) 긴 작업 호출(백그라운드) → 3초 뒤 deactivate(SIGTERM)
+$job = Start-Job { curl.exe -sS -X POST -m 240 -w "`nHTTP %{http_code} %{time_total}s" "https://$using:fqdn/api/long-task" }
+Start-Sleep 3
+az containerapp revision deactivate -g safeaca-kr -n safeaca-kr-app --revision safeaca-kr-app--ztest
+Receive-Job $job -Wait
+```
+
+```bash
+fqdn=$(az containerapp revision show -g safeaca-kr -n safeaca-kr-app --revision safeaca-kr-app--ztest --query properties.fqdn -o tsv)
+curl -sS -X POST -m 240 -w "\nHTTP %{http_code} %{time_total}s\n" "https://$fqdn/api/long-task" &
+sleep 3
+az containerapp revision deactivate -g safeaca-kr -n safeaca-kr-app --revision safeaca-kr-app--ztest
+wait
+```
+
+실측 결과(KR, template grace 30):
+
+| revision | 앱 env | 결과 | 로그 |
+| --- | --- | --- | --- |
+| `ztga` | `GRACE_SECONDS=180` (불일치) | 약 36초 후 **503** `no healthy upstream` | `start` → `draining`, `finish` 없음 (SIGKILL) |
+| `ztgb` | `GRACE_SECONDS=30` (일치) | **200**, 15초, `drainObserved:true` | `start` → `draining` → `finish` → `stopped` |
+
+교훈: grace는 반드시 `infra/revision-policy.json` 을 고쳐 파이프라인으로 배포해야 template과 앱 env가 함께 바뀝니다.
+`LONG_TASK_ABORT_ON_DRAIN=Y` 를 테스트하려면 같은 방법으로 env에 추가한 revision을 만들면 되고,
+응답은 deactivate 직후 `200 "result":"task_incompleted"` 입니다. 실험 후 테스트 revision은 비활성 상태로 둡니다.
+
+### G. 단위 테스트 (코드 수정 시)
 
 ```powershell
 python -m unittest discover -s tests       # drain 상태 머신, SIGTERM 교착 방지, 설정 검증 포함
@@ -370,13 +408,14 @@ gh workflow run restore.yml --repo <repo> --ref main -f source_run_id=<release r
 | retire가 시작하지 않고 대기 | release가 sea/usw 진행 중 (같은 concurrency group) | release 전체 완료 후 실행 |
 | retire 후 `restore.yml` 거부 | 이전 revision 비활성 | `revision activate` 후 restore (6.6) |
 | KQL 조회가 전체 열 반환 / `SYN0002` | Windows에서 여러 줄 인자 잘림, `kind` 예약어 | 한 줄로 변환, 열 이름 변경 (6.4-E) |
+| Portal에서 grace만 30으로 바꾼 뒤 긴 작업이 503 | template grace(30)와 앱 `GRACE_SECONDS`(180) 불일치 → 작업이 SIGKILL | 정책 파일 변경 후 파이프라인 배포 (6.4-F) |
 
 ## 6.8 실습 검증 기록
 
 | 항목 | 결과 |
 | --- | --- |
 | UAMI 전환 후 release `44452501783` (demo) | build → kr → sea → usw 모두 success, 3개 지역 `r44452501783` 100% |
-| KR v1 상태 | version `r13`, grace 180, Readiness `/readyz`, Liveness/Startup `/healthz`, `/verify` 200 |
+| KR v1 상태 (당시) | version `r13`, grace 180, Readiness `/readyz`, Liveness/Startup `/healthz`, `/verify` 200 |
 | v2 release `44460515139` (r14) + KR retire | 완료 후 KR 활성 revision은 `r44460515139` 1개 (v1 비활성) |
 | SIGTERM 중 긴 작업 (Log Analytics) | v1 `draining` 후 진행 중 작업 `finish drainObserved=true`, 이어서 `stopped` (6.4-E) |
 | 단위 테스트 | 105 OK (1 skipped) |

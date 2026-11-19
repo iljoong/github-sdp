@@ -44,6 +44,7 @@
   .bar { height:8px; background:#334155; border-radius:4px; overflow:hidden; margin-top:3px; }
   .bar > div { height:100%; width:0; background:#3b82f6; transition:width .3s linear; }
   .task.done .bar > div { background:var(--ok); } .task.failed .bar > div { background:var(--bad); }
+  .task.aborted .bar > div { background:var(--warn); }
   .muted { color:var(--muted); font-size:12px; }
 </style>
 </head>
@@ -283,9 +284,12 @@ async function startLongTask(card) {
   clearInterval(tick);
   const took = Math.round(now() - started);
   fill.style.width = "100%";
-  if (r.status === 200 && r.body && r.body.completed) {
+  if (r.status === 200 && r.body && r.body.result === "task_incompleted") {
+    row.classList.add("aborted");
+    label.textContent = `중단 응답 ${took}s · ${r.body.replica} · task_incompleted (drain 시작 → 즉시 응답, LONG_TASK_ABORT_ON_DRAIN=Y)`;
+  } else if (r.status === 200 && r.body && r.body.completed) {
     row.classList.add("done");
-    label.textContent = `완료 ${took}s · ${r.body.replica} · drainObserved: ${r.body.drainObserved ? "예 (종료 신호 중에도 끝까지 처리)" : "아니오"}`;
+    label.textContent = `완료 ${took}s · ${r.body.replica} · task_completed · drainObserved: ${r.body.drainObserved ? "예 (종료 신호 중에도 끝까지 처리)" : "아니오"}`;
   } else {
     row.classList.add("failed");
     const reason = r.error || (r.body && r.body.error) || `HTTP ${r.status}`;

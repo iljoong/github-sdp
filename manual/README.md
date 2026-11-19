@@ -15,6 +15,7 @@
 | 3 | [03-scripts-reference.md](03-scripts-reference.md) | `scripts\` 파일별 용도, 인자, 환경 변수, 사용 예, 오류 메시지 |
 | 4 | [04-operations-runbook.md](04-operations-runbook.md) | 최초 구성, 릴리스, 모니터링, 복구, 장애 대응 runbook |
 | 5 | [05-zero-downtime-demo.md](05-zero-downtime-demo.md) | 무중단 배포 데모: readiness/SIGTERM drain, `/verify` 화면, 긴 작업, demo retire, 수정 지도 |
+| 6 | [06-zero-downtime-demo-guide.md](06-zero-downtime-demo-guide.md) | 무중단 배포 실습: 사전 점검, 데모 절차, retire 상세, 테스트 방법(화면·폴링·curl·KQL), 실습 교훈 |
 
 ## 한눈에 보는 파이프라인
 

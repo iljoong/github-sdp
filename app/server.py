@@ -102,7 +102,7 @@ class Lifecycle:
     def state(self):
         return self._state
 
-    def _log(self, event, **fields):
+    def log(self, event, **fields):
         print(json.dumps({"kind": "lifecycle", "event": event, "time": utc_iso(),
                           "revision": os.environ.get("CONTAINER_APP_REVISION", "local"),
                           **fields}), flush=True)
@@ -115,7 +115,7 @@ class Lifecycle:
             self._drain_started = self._clock()
             self._drain_started_at = utc_iso()
             inflight = len(self._tasks)
-        self._log("draining", inflight=inflight, graceSeconds=self.settings.grace_seconds)
+        self.log("draining", inflight=inflight, graceSeconds=self.settings.grace_seconds)
         return True
 
     def start_task(self):
@@ -162,18 +162,126 @@ class Lifecycle:
                 return False
             self._state = "STOPPED"
             abandoned = len(self._tasks)
-        self._log("stopped", reason="idle" if idle else "deadline", abandoned=abandoned)
+        self.log("stopped", reason="idle" if idle else "deadline", abandoned=abandoned)
         return True
+
+
+DEFAULT_LIFECYCLE = Lifecycle(Settings.from_env({}))
+VERIFY_PAGE = Path(__file__).resolve().parent / "verify.html"
+CORS_HEADERS = {"Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type",
+                "Access-Control-Max-Age": "600"}
+
+
+def replica_name():
+    return os.environ.get("CONTAINER_APP_REPLICA_NAME") or socket.gethostname()
+
+
+def cors_path(path):
+    return path.startswith("/api/") or path == "/status"
 
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
+    @property
+    def lifecycle(self):
+        return getattr(self.server, "lifecycle", None) or DEFAULT_LIFECYCLE
+
+    def send_body(self, status, payload, content_type="application/json", path=""):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        if cors_path(path):
+            for name, value in CORS_HEADERS.items():
+                self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def send_json(self, status, body, path):
+        self.send_body(status, json.dumps(body).encode(), path=path)
+
+    def do_OPTIONS(self):
+        path = self.path.split("?", 1)[0]
+        if not cors_path(path):
+            self.send_json(404, {"error": "not found"}, path)
+            return
+        self.send_response(204)
+        for name, value in CORS_HEADERS.items():
+            self.send_header(name, value)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_POST(self):
+        path = self.path.split("?", 1)[0]
+        length = int(self.headers.get("Content-Length") or 0)
+        if length:
+            self.rfile.read(min(length, 4096))
+        if path != "/api/long-task":
+            self.send_json(404, {"error": "not found"}, path)
+            return
+        self.long_task(path)
+
+    def long_task(self, path):
+        lifecycle = self.lifecycle
+        status, task_id = lifecycle.start_task()
+        revision = os.environ.get("CONTAINER_APP_REVISION", "local")
+        if status != 200:
+            reason = "draining" if status == 503 else "too many long tasks"
+            self.send_json(status, {"error": reason, "revision": revision}, path)
+            return
+        started = time.monotonic()
+        duration = lifecycle.settings.long_task_seconds
+        self.log_task("start", task_id, revision)
+        try:
+            while (left := duration - (time.monotonic() - started)) > 0:
+                time.sleep(min(1.0, left))
+        finally:
+            lifecycle.finish_task(task_id)
+        body = {"id": task_id, "revision": revision, "replica": replica_name(),
+                "durationMs": round((time.monotonic() - started) * 1000), "completed": True,
+                "drainObserved": lifecycle.state != "SERVING"}
+        self.log_task("finish", task_id, revision, drainObserved=body["drainObserved"],
+                      durationMs=body["durationMs"])
+        self.send_json(200, body, path)
+
+    @staticmethod
+    def log_task(event, task_id, revision, **fields):
+        print(json.dumps({"kind": "long_task", "event": event, "id": task_id, "time": utc_iso(),
+                          "revision": revision, **fields}), flush=True)
+
+    def demo_get(self, path, revision):
+        """Returns (status, body) for demo endpoints, or None for other paths."""
+        if path == "/readyz":
+            body = self.lifecycle.status()
+            return (200 if body["ready"] else 503), body
+        if path == "/status":
+            return 200, {**self.lifecycle.status(), "revision": revision, "replica": replica_name()}
+        if path == "/api/version":
+            return 200, {"version": os.environ.get("APP_VERSION", "dev"),
+                         "release": os.environ.get("RELEASE_ID", "bootstrap"),
+                         "revision": revision, "replica": replica_name(),
+                         "dnsSuffix": os.environ.get("CONTAINER_APP_ENV_DNS_SUFFIX", ""),
+                         "app": os.environ.get("CONTAINER_APP_NAME", "local"), "time": utc_iso()}
+        return None
+
     def do_GET(self):
         started = time.monotonic()
         path = self.path.split("?", 1)[0]
         revision = os.environ.get("CONTAINER_APP_REVISION", "local")
+        if path == "/verify":
+            if VERIFY_PAGE.is_file():
+                self.send_body(200, VERIFY_PAGE.read_bytes(), "text/html; charset=utf-8")
+            else:
+                self.send_json(404, {"error": "verify.html missing"}, path)
+            return
+        demo = self.demo_get(path, revision)
+        if demo is not None:
+            self.send_json(*demo, path)
+            return
         if path == "/healthz":
             status, body = 200, {"ready": True, "revision": revision}
         elif path == "/work":
@@ -209,5 +317,28 @@ class Handler(BaseHTTPRequestHandler):
                 }), flush=True)
 
 
+def run(settings, port):
+    lifecycle = Lifecycle(settings)
+    httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    # In-flight threads must not block exit once the grace deadline is reached.
+    httpd.daemon_threads = True
+    httpd.lifecycle = lifecycle
+
+    def on_signal(_signum, _frame):
+        lifecycle.begin_drain()  # signal-safe: flag + timestamp only
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, on_signal)
+    serving = threading.Thread(target=httpd.serve_forever, daemon=True)
+    serving.start()
+    lifecycle.log("serving", port=port, graceSeconds=settings.grace_seconds,
+                   longTaskSeconds=settings.long_task_seconds)
+    while not lifecycle.should_exit():
+        time.sleep(0.2)
+    httpd.shutdown()
+    httpd.server_close()
+    return 0
+
+
 if __name__ == "__main__":
-    ThreadingHTTPServer(("0.0.0.0", int(os.environ.get("PORT", "8080"))), Handler).serve_forever()
+    sys.exit(run(Settings.from_env(os.environ), int(os.environ.get("PORT", "8080"))))

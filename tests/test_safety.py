@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import common
 import inspect_oidc
 import metrics
+import retire
 import rollout
 import snapshot as snapshot_script
 
@@ -944,12 +945,79 @@ class SafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "rollback"):
             rollout.cancelled(signal.SIGTERM, None)
 
+    def retire_run(self, success=None, ready=True, active=(True, False), drift=None, **kwargs):
+        s = snapshot()
+        states = iter(active)
+        current = {"properties": {"configuration": {"ingress": {"fqdn": "myapp.example"}}}}
+
+        def revision(name):
+            if name == s["stable"]:
+                return {"properties": {"active": next(states, active[-1])}}
+            return {"properties": {"active": True}}
+
+        guarded = patch.object(retire, "guarded_state", side_effect=drift,
+                               return_value=(current, {s["candidate"]: 100}))
+        with patch.dict(os.environ, {"SOURCE_RUN_ID": "123", "REGION": "kr",
+                                     "RESOURCE_GROUP": "group", "CONTAINER_APP": "myapp"}), \
+             patch.object(retire, "verify_context"), guarded as guard, \
+             patch.object(retire, "candidate_owned", return_value={"properties": {}}), \
+             patch.object(retire, "ready", return_value=ready), \
+             patch.object(retire, "revision", side_effect=revision), \
+             patch.object(retire, "az") as az, \
+             patch.object(retire, "request") as request, \
+             patch.object(retire, "save") as save, \
+             patch.object(retire.time, "sleep"), patch("builtins.print"):
+            try:
+                retire.retire(s, success or {"revision": s["candidate"]}, **kwargs)
+            finally:
+                self.calls = {"az": az, "request": request, "save": save, "guard": guard}
+
+    def test_retire_refuses_without_matching_success(self):
+        with self.assertRaisesRegex(RuntimeError, "success"):
+            self.retire_run(success={"revision": "other"})
+        self.calls["az"].assert_not_called()
+
+    def test_retire_refuses_on_drift(self):
+        with self.assertRaisesRegex(RuntimeError, "Traffic drift"):
+            self.retire_run(drift=RuntimeError("Traffic drift; refusing blind overwrite"))
+        self.calls["az"].assert_not_called()
+        self.calls["guard"].assert_called_once_with(snapshot(), {"myapp--r123": 100})
+
+    def test_retire_refuses_unready_candidate(self):
+        with self.assertRaisesRegex(RuntimeError, "Candidate"):
+            self.retire_run(ready=False)
+        self.calls["az"].assert_not_called()
+
+    def test_retire_deactivates_then_verifies(self):
+        self.retire_run()
+        self.calls["az"].assert_called_once()
+        args = self.calls["az"].call_args.args
+        self.assertIn("deactivate", args)
+        self.assertEqual(args[args.index("--revision") + 1], "myapp--old")
+        request_args = self.calls["request"].call_args.args
+        self.assertEqual((request_args[0], request_args[1], request_args[-1]),
+                         ("myapp.example", "/work", "myapp--r123"))
+        path, record = self.calls["save"].call_args.args
+        self.assertEqual(Path(path), Path("evidence") / "kr" / "demo-retire.json")
+        self.assertIs(record["verified"], True)
+        self.assertEqual((record["stable"], record["candidate"]), ("myapp--old", "myapp--r123"))
+
+    def test_retire_times_out_if_stable_stays_active(self):
+        with self.assertRaisesRegex(RuntimeError, "Stable still active"):
+            self.retire_run(active=(True,), timeout=0, interval=0)
+        self.calls["save"].assert_not_called()
+
     def test_region_workflows_are_sequential_and_share_restore_lock(self):
         release = (ROOT / ".github" / "workflows" / "release.yml").read_text()
         restore = (ROOT / ".github" / "workflows" / "restore.yml").read_text()
-        for text in (release, restore):
+        demo_retire = (ROOT / ".github" / "workflows" / "demo-retire.yml").read_text()
+        for text in (release, restore, demo_retire):
             self.assertIn("group: safe-aca-production", text)
             self.assertIn("cancel-in-progress: false", text)
+        self.assertIn("environment: prod-${{ inputs.region }}", demo_retire)
+        self.assertIn("check_source.py", demo_retire)
+        self.assertIn("scripts/retire.py", demo_retire)
+        self.assertNotIn("[all,", demo_retire)
         self.assertIn("needs: korea", release)
         self.assertIn("needs: southeastasia", release)
         self.assertNotIn("matrix:", release)

@@ -17,8 +17,8 @@
 | --- | --- |
 | 배포 중 사용자 요청 오류 0 | readiness(`/readyz`)와 liveness(`/healthz`) 분리, ACA canary 10/50/100% |
 | 종료 신호를 받은 replica가 새 요청을 받지 않음 | SIGTERM 수신 즉시 `/readyz` 가 503 → ACA가 load balancing에서 제외 |
-| 진행 중인 긴 작업은 끝까지 처리 | drain 상태에서도 HTTP 서버는 계속 응답, 작업 종료 후에만 프로세스 종료 |
-| 기본 30초가 아닌 충분한 종료 유예 | `template.terminationGracePeriodSeconds = 180` (`infra/revision-policy.json`) |
+| 진행 중인 긴 작업은 끝까지 처리 (또는 즉시 응답) | drain 상태에서도 HTTP 서버는 계속 응답, 작업 종료 후에만 프로세스 종료. `LONG_TASK_ABORT_ON_DRAIN=Y` 이면 drain 시작 즉시 `task_incompleted` 로 응답 |
+| ACA 기본값과 같은 종료 유예 30초 | `template.terminationGracePeriodSeconds = 30` (`infra/revision-policy.json`), 앱 `GRACE_SECONDS` 도 30 |
 
 ACA는 **트래픽 0%로 바꾸는 것만으로는 SIGTERM을 보내지 않습니다.** revision을
 비활성화(deactivate)하거나 scale-in 할 때만 보냅니다. 운영 파이프라인은 즉시 복구를 위해
@@ -37,7 +37,7 @@ SERVING ────────────────────────
 
 - 신호 핸들러는 플래그와 시각만 기록합니다(signal-safe). 실제 종료 판단은 main thread의
   0.2초 루프(`should_exit`)가 합니다.
-- deadline = drain 시작 + `GRACE_SECONDS` − `SHUTDOWN_MARGIN_SECONDS` (기본 180 − 10 = 170초).
+- deadline = drain 시작 + `GRACE_SECONDS` − `SHUTDOWN_MARGIN_SECONDS` (기본 30 − 10 = 20초).
   ACA가 SIGKILL을 보내기 전에 스스로 종료하기 위한 여유입니다.
 - 상태 전환마다 `kind: "lifecycle"` 로그 한 줄(`serving` / `draining` / `stopped`)을, 긴 작업은
   `kind: "long_task"` 로그(`start` / `finish`)를 남깁니다. **`kind: "business"` 는 `/work` 만**
@@ -51,23 +51,31 @@ SERVING ────────────────────────
 | `GET /readyz` | readiness probe (상태 JSON 포함) | 200 | **503** |
 | `GET /work` | 기존 business 계약 + health gate 로그 (변경 없음) | 200 | 200 |
 | `GET /api/version` | 화면용 `{version, release, revision, replica, dnsSuffix, app, time}` | 200 | 200 |
-| `GET /status` | `{state, ready, inflight[], drainStartedAt, graceSeconds, graceRemaining, longTaskSeconds, revision, replica}` | 200 | 200 |
-| `POST /api/long-task` | `LONG_TASK_SECONDS` 동안 작업 후 `{id, revision, replica, durationMs, completed, drainObserved}` | 200 (replica당 동시 3개 초과 시 **429**) | 새 요청 **503**, 진행 중 작업은 계속 |
+| `GET /status` | `{state, ready, inflight[], drainStartedAt, graceSeconds, graceRemaining, longTaskSeconds, abortOnDrain, revision, replica}` | 200 | 200 |
+| `POST /api/long-task` | `LONG_TASK_SECONDS` 동안 작업 후 `{id, revision, replica, durationMs, completed, result, drainObserved}` | 200 `result: task_completed` (replica당 동시 3개 초과 시 **429**) | 새 요청 **503**. 진행 중 작업은 기본 끝까지 실행(`task_completed`), `LONG_TASK_ABORT_ON_DRAIN=Y` 이면 즉시 200 `task_incompleted` |
 | `GET /verify` | 검증 화면 (`app/verify.html`) | 200 | 200 |
 | `GET /` | 소개 화면 (`app/index.html`): 앱 설명, 현재 버전/상태, Swagger형 endpoint 목록과 **Execute**, System/Light/Dark 테마 | 200 | 200 |
 
 - `/api/*`, `/status` 는 CORS(`Access-Control-Allow-Origin: *`)와 `OPTIONS` preflight를 지원합니다.
   화면이 공유 FQDN에서 열린 뒤 revision 전용 FQDN을 직접 호출하기 때문입니다.
-- `drainObserved: true` = 작업 도중 종료 신호를 받았지만 끝까지 처리했다는 증거입니다.
+- `drainObserved: true` = 작업 도중 종료 신호를 받았다는 증거입니다. `result` 로 결과를 구분합니다.
+
+| `result` | `completed` | 의미 |
+| --- | --- | --- |
+| `task_completed` | `true` | `LONG_TASK_SECONDS` 끝까지 실행 (drain 중이었다면 `drainObserved: true`) |
+| `task_incompleted` | `false` | `LONG_TASK_ABORT_ON_DRAIN=Y` 에서 drain 시작 즉시 중단하고 응답 (`drainObserved: true`, 약 0.2초 이내) |
+
+두 경우 모두 HTTP 200 이므로 클라이언트는 오류 없이 응답을 받고, 재시도 여부는 `result` 로 판단합니다.
 
 ## 5.4 조정 값(tunable) 일람
 
 | 값 | 기본 | 설정 위치 | 설명 |
 | --- | --- | --- | --- |
 | `APP_VERSION` | `dev` | **이미지** (`app/Dockerfile` `ARG`, `build.yml` 이 `release.yml` 은 `r<run 번호>`, `release-kr.yml` 은 `k<run 번호>`, bootstrap 이 `bootstrap`) | 화면의 큰 버전 글자. template env에 넣지 말 것(5.5) |
-| `terminationGracePeriodSeconds` | 180 | `infra/revision-policy.json` | ACA가 SIGTERM 후 SIGKILL까지 기다리는 시간 |
-| `GRACE_SECONDS` | 180 | candidate env (위 정책 값에서 자동 생성) | 앱이 deadline 계산과 화면 카운트다운에 사용 |
-| `LONG_TASK_SECONDS` | 120 | 앱 env (기본값은 `server.py`) | 긴 작업 길이. 자동 상한 적용(5.5) |
+| `terminationGracePeriodSeconds` | 30 | `infra/revision-policy.json` | ACA가 SIGTERM 후 SIGKILL까지 기다리는 시간 (ACA 기본값과 동일) |
+| `GRACE_SECONDS` | 30 | candidate env (위 정책 값에서 자동 생성) | 앱이 deadline 계산과 화면 카운트다운에 사용 |
+| `LONG_TASK_SECONDS` | 120 | 앱 env (기본값은 `server.py`) | 긴 작업 길이. 자동 상한 적용(5.5) → grace 30에서는 **15초** |
+| `LONG_TASK_ABORT_ON_DRAIN` | `N` | 앱 env | `Y`(대소문자 무관): drain 시작 시 진행 중 긴 작업을 즉시 `task_incompleted` 로 응답. 그 외 값/미설정: 끝까지 실행 |
 | `SHUTDOWN_MARGIN_SECONDS` | 10 | 앱 env | SIGKILL 전에 스스로 종료하기 위한 여유 (`< GRACE_SECONDS`) |
 | `DRAIN_IDLE_SECONDS` | 2 | 앱 env | 마지막 작업 종료 후 화면이 최종 상태를 볼 수 있게 기다리는 시간 |
 | `LONG_TASK_MAX_CONCURRENT` | 3 | 앱 env | replica당 동시 긴 작업 수 (초과 시 429) |
@@ -85,7 +93,10 @@ SERVING ────────────────────────
 ## 5.5 안전하게 값을 바꾸는 규칙
 
 1. **`LONG_TASK_SECONDS` ≤ `GRACE_SECONDS` − `SHUTDOWN_MARGIN_SECONDS` − 5** 이어야 작업이
-   SIGKILL 전에 끝납니다. 더 크게 주면 앱이 자동으로 이 값으로 줄입니다.
+   SIGKILL 전에 끝납니다. 더 크게 주면 앱이 자동으로 이 값으로 줄입니다(grace 30 → 15초).
+   120초 작업을 시연하려면 grace를 135초 이상으로 올립니다.
+   **앱의 `GRACE_SECONDS` 와 template grace가 다르면** (예: Portal에서 template만 30으로 변경)
+   앱은 120초 작업을 계속하다 30초 시점에 SIGKILL 되고, 클라이언트는 `503 no healthy upstream` 을 받습니다(실측).
 2. **긴 작업 ≤ 230초**: ACA ingress 요청 timeout이 240초이므로 앱이 230초로 자동 제한합니다.
 3. **grace ≤ 600초**: ACA 최대값. 앱도 1..600 밖이면 시작을 거부합니다.
 4. **grace는 `infra/revision-policy.json` 만 바꾸고 새 release를 실행**합니다.
@@ -100,7 +111,7 @@ SERVING ────────────────────────
 
 ## 5.6 데모 준비 (1회, 결정 D9)
 
-기존 환경의 v1은 drain 로직, `/status`, CORS, 180초 grace가 없는 이전 코드입니다.
+기존 환경의 v1은 drain 로직, `/status`, CORS, 정책 grace가 없는 이전 코드입니다.
 따라서 **준비용 release를 1회** 실행해 새 코드를 v1으로 만들어 둡니다.
 
 ```powershell
@@ -108,11 +119,11 @@ gh workflow run release.yml --repo $repo --ref main -f profile=demo
 # kr → sea → usw 승인. 완료 후 이 run의 revision(예: r41)이 데모의 v1 입니다.
 ```
 
-이 release가 readiness를 `/readyz` 로 바꾸고 grace 180초를 적용합니다. 확인:
+이 release가 readiness를 `/readyz` 로 바꾸고 정책 grace(30초)를 적용합니다. 확인:
 
 ```powershell
 az containerapp show -g <RG> -n <APP> --query "properties.template.{grace:terminationGracePeriodSeconds, probes:containers[0].probes[].{type:type,path:httpGet.path}}"
-# grace: 180, Readiness: /readyz
+# grace: 30, Readiness: /readyz
 ```
 
 플랫폼 사전 확인(ZDD-R00, 비운영 환경에서 1회): 비활성화 중인 revision의 FQDN이
@@ -126,10 +137,10 @@ draining replica로 계속 라우팅되는지, 열려 있는 요청이 비활성
 | T0 | `https://<APP FQDN>/verify` 를 연다 | 큰 글자 v1(예: `r41`), 스트립이 v1 색으로 채워짐, v1 카드 `SERVING` |
 | T1 | `gh workflow run release.yml -f profile=demo` 후 kr 승인 (빠르게: `gh workflow run release-kr.yml`, KR만·quick 프로필) | 10% → 50% → 100% (quick: 50% → 100%) 동안 스트립이 두 색으로 섞이다가 v2 색으로 바뀜. **오류 0** |
 | T2 | release run이 **전체 완료**될 때까지 기다림 (sea, usw 승인 포함) | v2 카드 등장. v1 카드: 트래픽 0%, `SERVING`, ready ✓ |
-| T3 | v1 카드의 **"긴 작업 시작"** 클릭 | v1 카드에 진행 막대 `0s / 약 120s` |
-| T4 | 즉시 `demo-retire.yml` 실행 후 `prod-kr` 승인 (아래 명령) | — |
-| T5 | (deactivate → v1 replica에 SIGTERM) | v1 카드 `DRAINING`, ready ✗, grace 남음 180s부터 감소 |
-| T6 | 약 120초 후 | 진행 막대 `완료 … drainObserved: 예`. 약 2초 뒤 v1 카드 `STOPPED` |
+| T3 | `prod-kr` retire 승인 후, retire job이 deactivate 단계에 들어가기 직전에 v1 카드의 **"긴 작업 시작"** 클릭 | v1 카드에 진행 막대 `0s / 약 15s` |
+| T4 | (T3 전에) `demo-retire.yml` 실행 후 `prod-kr` 승인 (아래 명령) | — |
+| T5 | (deactivate → v1 replica에 SIGTERM) | v1 카드 `DRAINING`, ready ✗, grace 남음 30s부터 감소 |
+| T6 | 작업 종료 시 | 기본: `완료 … task_completed · drainObserved: 예`. `LONG_TASK_ABORT_ON_DRAIN=Y`: 즉시 `중단 응답 … task_incompleted`. 약 2초 뒤 v1 카드 `STOPPED` |
 | T7 | 정리 | 스트립은 처음부터 끝까지 빨강 없음, 오류 카운터 0 |
 
 ```powershell
@@ -144,7 +155,10 @@ gh run watch <RETIRE_RUN_ID> --repo $repo
   (`safe-aca-production`)을 쓰고 `check_source.py` 가 completed run만 허용하기 때문입니다.
   `profile=demo` 를 쓰면 지역당 10~20분이라 대기가 짧습니다. `release-kr.yml`(quick 기본)은
   KR만 배포하고 끝나므로 약 10분 안에 retire까지 진행할 수 있습니다(6.3.1).
-- T3(버튼)는 release 완료 후, T4 직전에 누릅니다. 120초면 승인 + deactivate에 충분합니다.
+- grace 30에서는 긴 작업이 15초뿐이라 retire 승인·job 시작보다 짧습니다. 승인 후
+  `gh run watch` 로 retire job이 시작된 것을 보고 "긴 작업 시작"을 누르거나, 몇 초 간격으로
+  여러 번 눌러 하나라도 deactivate 시점에 진행 중이게 합니다(replica당 동시 3개).
+  정확한 타이밍이 필요하면 [6.4-F](06-zero-downtime-demo-guide.md#f-수동-deactivate-실험-grace--abort-검증)의 수동 deactivate 실험을 사용합니다.
 - retire 대상 지역은 그 run의 `evidence/<region>/success.json` 이 있어야 합니다.
 - 화면은 그 지역의 앱 FQDN에서 열어야 합니다(지역마다 앱이 따로 있음).
 
@@ -169,7 +183,7 @@ gh run watch <RETIRE_RUN_ID> --repo $repo
 | 트래픽 비율 | 상단 폴링 중 최근 30초 동안 이 revision이 응답한 비율 |
 | grace 남음 | DRAINING 중 SIGKILL까지 남은 초 |
 | replica · 진행 중 작업 | `/status` 에 응답한 replica 기준 힌트. replica가 여러 개면 작업은 다른 replica에 있을 수 있음(결정 D10) |
-| 긴 작업 진행 막대 | 브라우저 자체 타이머 기준. 결과: `완료 Ns · replica · drainObserved: 예/아니오` 또는 `실패 Ns · 사유` |
+| 긴 작업 진행 막대 | 브라우저 자체 타이머 기준. 결과: `완료 Ns · replica · task_completed · drainObserved: 예/아니오`, `중단 응답 Ns · task_incompleted`(주황), 또는 `실패 Ns · 사유` |
 
 ## 5.9 문제 해결
 
@@ -242,7 +256,7 @@ gh workflow run restore.yml --repo $repo --ref main -f source_run_id=<RELEASE_RU
 python -m unittest discover -s tests -v
 $env:LONG_TASK_SECONDS='20'; $env:GRACE_SECONDS='40'; python app/server.py
 # 브라우저: http://localhost:8080/verify → "긴 작업 시작" → 서버 창에서 Ctrl+C
-# 기대: 카드 DRAINING → 약 20초 뒤 "완료 … drainObserved: 예" → 카드 STOPPED, 서버 exit 0
+# 기대: 카드 DRAINING → 약 20초 뒤 "완료 … task_completed · drainObserved: 예" ($env:LONG_TASK_ABORT_ON_DRAIN='Y' 면 즉시 "중단 응답 … task_incompleted") → 카드 STOPPED, 서버 exit 0
 ```
 
 Windows 콘솔의 `Ctrl+C`(SIGINT)는 SIGTERM과 똑같이 drain을 시작합니다. Linux/macOS에서는

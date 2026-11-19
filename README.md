@@ -85,7 +85,7 @@ Phase 2/3은 승인 대기 초안이며 requirement/evidence ledger로 상태를
 | [.github/workflows/release-kr.yml](.github/workflows/release-kr.yml) | 빠른 무중단 검증용: 빌드 후 KR만 배포, 기본 `quick` 프로필(0→50→100%, 단계별 60초) (공유 [build.yml](.github/workflows/build.yml) 사용) |
 | [.github/workflows/restore.yml](.github/workflows/restore.yml) | baseline artifact 기반 보호된 복구 workflow |
 | [.github/workflows/demo-retire.yml](.github/workflows/demo-retire.yml) | 데모 전용: 완료된 release의 이전 revision 비활성화(SIGTERM 시연), [scripts/retire.py](scripts/retire.py) 실행 |
-| [infra/](infra/) | ACR, managed identity, ACA 환경/앱용 Bicep, probe 정책, [revision-policy.json](infra/revision-policy.json)(종료 유예 180초) |
+| [infra/](infra/) | ACR, managed identity, ACA 환경/앱용 Bicep, probe 정책, [revision-policy.json](infra/revision-policy.json)(종료 유예 30초, ACA 기본값) |
 | [scripts/](scripts/) | bootstrap, OIDC 설정, snapshot, rollout, metrics 검증 도구 |
 | [tests/](tests/) | 안전성 및 health gate 단위 테스트 |
 | [manual/](manual/README.md) | SDP 배포 파이프라인 운영자 매뉴얼 (설계, workflow, scripts 상세, runbook) |

@@ -38,14 +38,25 @@ class LifecycleTests(unittest.TestCase):
 
     def test_settings_defaults_and_clamp(self):
         defaults = server.Settings.from_env({})
-        self.assertEqual(defaults.long_task_seconds, 120)
-        self.assertEqual(defaults.grace_seconds, 180)
+        self.assertEqual(defaults.long_task_seconds, 15)
+        self.assertEqual(defaults.grace_seconds, 30)
         self.assertEqual(defaults.margin_seconds, 10)
         self.assertEqual(defaults.idle_seconds, 2)
         self.assertEqual(defaults.max_concurrent, 3)
-        self.assertEqual(server.Settings.from_env({"LONG_TASK_SECONDS": "500"}).long_task_seconds, 165)
+        self.assertIs(defaults.abort_on_drain, False)
+        self.assertEqual(server.Settings.from_env(
+            {"GRACE_SECONDS": "180", "LONG_TASK_SECONDS": "500"}).long_task_seconds, 165)
+        self.assertEqual(server.Settings.from_env(
+            {"GRACE_SECONDS": "180"}).long_task_seconds, 120)
         self.assertEqual(server.Settings.from_env(
             {"GRACE_SECONDS": "600", "LONG_TASK_SECONDS": "500"}).long_task_seconds, 230)
+
+    def test_abort_on_drain_only_for_y(self):
+        for value, expected in (("Y", True), ("y", True), (" Y ", True), ("N", False),
+                                ("yes", False), ("true", False), ("", False)):
+            with self.subTest(value=value):
+                self.assertIs(server.Settings.from_env(
+                    {"LONG_TASK_ABORT_ON_DRAIN": value}).abort_on_drain, expected)
 
     def test_settings_reject_invalid(self):
         for value in ("abc", "0", "601"):
@@ -94,7 +105,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(lifecycle.start_task()[0], 200)
 
     def test_exit_after_last_task_plus_idle(self):
-        lifecycle = self.lifecycle()
+        lifecycle = self.lifecycle(GRACE_SECONDS=180)
         _, task = lifecycle.start_task()
         lifecycle.begin_drain()
         self.now[0] = 50
@@ -117,7 +128,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertTrue(lifecycle.should_exit())
 
     def test_exit_at_deadline_with_inflight(self):
-        lifecycle = self.lifecycle()
+        lifecycle = self.lifecycle(GRACE_SECONDS=180)
         lifecycle.start_task()
         self.assertIsNone(lifecycle.status()["graceRemaining"])
         lifecycle.begin_drain()
@@ -216,8 +227,37 @@ class EndpointTests(unittest.TestCase):
             status, _, body = task.result(5)
         self.assertEqual(status, 200)
         self.assertIs(body["completed"], True)
+        self.assertEqual(body["result"], "task_completed")
         self.assertIs(body["drainObserved"], True)
         self.assertGreaterEqual(body["durationMs"], 300)
+
+    def test_long_task_abort_on_drain_responds_incompleted(self):
+        self.httpd.lifecycle = self.lifecycle = server.Lifecycle(server.Settings.from_env(
+            {"LONG_TASK_SECONDS": "10", "LONG_TASK_ABORT_ON_DRAIN": "Y"}))
+        with concurrent.futures.ThreadPoolExecutor(1) as pool:
+            task = pool.submit(self.json, "/api/long-task", "POST")
+            for _ in range(100):
+                if self.lifecycle.status()["inflight"]:
+                    break
+                time.sleep(0.01)
+            drained = time.monotonic()
+            self.lifecycle.begin_drain()
+            status, _, body = task.result(5)
+        self.assertLess(time.monotonic() - drained, 1.5)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["result"], "task_incompleted")
+        self.assertIs(body["completed"], False)
+        self.assertIs(body["drainObserved"], True)
+        self.assertEqual(self.lifecycle.status()["inflight"], [])
+        self.assertIs(self.lifecycle.status()["abortOnDrain"], True)
+        finish = [r for r in printed_records(self.log) if r.get("event") == "finish"]
+        self.assertEqual(finish[-1]["result"], "task_incompleted")
+
+    def test_long_task_without_drain_is_completed(self):
+        status, _, body = self.json("/api/long-task", "POST")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["result"], "task_completed")
+        self.assertIs(body["drainObserved"], False)
 
     def test_long_task_cap_returns_429(self):
         for _ in range(3):

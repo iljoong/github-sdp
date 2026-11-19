@@ -7,7 +7,7 @@ Endpoints
     GET  /work            business contract + `kind: business` log (SDP health gate)
     GET  /api/version     version label, release, revision, replica, DNS suffix
     GET  /status          drain state, in-flight long tasks, grace countdown
-    POST /api/long-task   ~LONG_TASK_SECONDS of work that survives SIGTERM
+    POST /api/long-task   ~LONG_TASK_SECONDS of work; result task_completed | task_incompleted
     GET  /verify          zero-downtime verification page (verify.html)
     OPTIONS /api/*, /status   CORS preflight (the page calls revision FQDNs)
 
@@ -15,16 +15,19 @@ Drain state machine
     SERVING --SIGTERM/SIGINT--> DRAINING --(no in-flight for DRAIN_IDLE_SECONDS)
                                          or (GRACE_SECONDS - SHUTDOWN_MARGIN_SECONDS)--> STOPPED (exit 0)
     While DRAINING: /readyz is 503 so the platform stops routing new requests,
-    new long tasks get 503, in-flight long tasks keep running, HTTP keeps serving.
+    new long tasks get 503, in-flight long tasks keep running (or, with
+    LONG_TASK_ABORT_ON_DRAIN=Y, stop and answer task_incompleted at once), HTTP keeps serving.
 
 Environment (read once at startup; invalid values fail fast)
     APP_VERSION                dev   label shown on /verify (baked into the image)
     RELEASE_ID                 bootstrap
-    LONG_TASK_SECONDS          120   clamped to min(value, GRACE - MARGIN - 5, 230)
-    GRACE_SECONDS              180   must equal template terminationGracePeriodSeconds (1..600)
+    LONG_TASK_SECONDS          120   clamped to min(value, GRACE - MARGIN - 5, 230) -> 15 with grace 30
+    GRACE_SECONDS              30    must equal template terminationGracePeriodSeconds (1..600)
     SHUTDOWN_MARGIN_SECONDS    10    exit this long before SIGKILL
     DRAIN_IDLE_SECONDS         2     linger after the last task so /verify can see it
     LONG_TASK_MAX_CONCURRENT   3     per replica; extra requests get 429
+    LONG_TASK_ABORT_ON_DRAIN   N     Y: answer in-flight long tasks immediately on drain;
+                                     anything else: run them to the end
     DEMO_LATENCY_MS / DEMO_FAILURE_PERCENT   /work tuning (unchanged)
 """
 import json
@@ -67,10 +70,11 @@ class Settings:
     margin_seconds: int
     idle_seconds: float
     max_concurrent: int
+    abort_on_drain: bool = False
 
     @classmethod
     def from_env(cls, env):
-        grace = _number(env, "GRACE_SECONDS", 180, int)
+        grace = _number(env, "GRACE_SECONDS", 30, int)
         margin = _number(env, "SHUTDOWN_MARGIN_SECONDS", 10, int)
         long_task = _number(env, "LONG_TASK_SECONDS", 120)
         idle = _number(env, "DRAIN_IDLE_SECONDS", 2)
@@ -83,7 +87,8 @@ class Settings:
             raise ValueError("LONG_TASK_SECONDS/DRAIN_IDLE_SECONDS must be >= 0 and "
                              "LONG_TASK_MAX_CONCURRENT >= 1")
         long_task = min(long_task, max(grace - margin - 5, 0), INGRESS_TIMEOUT_CAP_SECONDS)
-        return cls(long_task, grace, margin, idle, limit)
+        abort = env.get("LONG_TASK_ABORT_ON_DRAIN", "N").strip().upper() == "Y"
+        return cls(long_task, grace, margin, idle, limit, abort)
 
 
 class Lifecycle:
@@ -148,6 +153,7 @@ class Lifecycle:
                 "drainStartedAt": self._drain_started_at,
                 "graceSeconds": self.settings.grace_seconds, "graceRemaining": remaining,
                 "longTaskSeconds": self.settings.long_task_seconds,
+                "abortOnDrain": self.settings.abort_on_drain,
             }
 
     def request_drain(self):
@@ -243,17 +249,24 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(status, {"error": reason, "revision": revision}, path)
             return
         started = time.monotonic()
-        duration = lifecycle.settings.long_task_seconds
+        settings = lifecycle.settings
+        duration = settings.long_task_seconds
+        step = 0.2 if settings.abort_on_drain else 1.0
+        completed = True
         self.log_task("start", task_id, revision)
         try:
             while (left := duration - (time.monotonic() - started)) > 0:
-                time.sleep(min(1.0, left))
+                if settings.abort_on_drain and lifecycle.state != "SERVING":
+                    completed = False
+                    break
+                time.sleep(min(step, left))
         finally:
             lifecycle.finish_task(task_id)
+        result = "task_completed" if completed else "task_incompleted"
         body = {"id": task_id, "revision": revision, "replica": replica_name(),
-                "durationMs": round((time.monotonic() - started) * 1000), "completed": True,
-                "drainObserved": lifecycle.state != "SERVING"}
-        self.log_task("finish", task_id, revision, drainObserved=body["drainObserved"],
+                "durationMs": round((time.monotonic() - started) * 1000), "completed": completed,
+                "result": result, "drainObserved": lifecycle.state != "SERVING"}
+        self.log_task("finish", task_id, revision, result=result, drainObserved=body["drainObserved"],
                       durationMs=body["durationMs"])
         self.send_json(200, body, path)
 

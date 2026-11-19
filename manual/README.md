@@ -21,6 +21,7 @@
 
 ```text
  [운영자] gh workflow run release.yml -f profile=demo|production
+         (KR만 빠르게: gh workflow run release-kr.yml  → profile=quick, 0% → 50% → 100%)
         │
         ▼
  ┌─────────────┐   unit test / compile / docker build (1회)

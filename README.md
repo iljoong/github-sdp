@@ -81,7 +81,7 @@ Phase 2/3은 승인 대기 초안이며 requirement/evidence ledger로 상태를
 | [app/](app/) | `/healthz`, `/readyz`, `/work` 와 무중단 데모용 `/api/version`, `/status`, `/api/long-task`, SIGTERM drain을 제공하는 데모 앱 |
 | [app/verify.html](app/verify.html) | `/verify` 무중단 배포 검증 화면 (1초 폴링, revision 카드, 긴 작업 버튼) |
 | [.github/workflows/release.yml](.github/workflows/release.yml) | 이미지 빌드와 3개 지역 순차 배포 진입 workflow |
-| [.github/workflows/release-kr.yml](.github/workflows/release-kr.yml) | 빠른 무중단 검증용: 빌드 후 KR만 배포 (공유 [build.yml](.github/workflows/build.yml) 사용) |
+| [.github/workflows/release-kr.yml](.github/workflows/release-kr.yml) | 빠른 무중단 검증용: 빌드 후 KR만 배포, 기본 `quick` 프로필(0→50→100%, 단계별 60초) (공유 [build.yml](.github/workflows/build.yml) 사용) |
 | [.github/workflows/restore.yml](.github/workflows/restore.yml) | baseline artifact 기반 보호된 복구 workflow |
 | [.github/workflows/demo-retire.yml](.github/workflows/demo-retire.yml) | 데모 전용: 완료된 release의 이전 revision 비활성화(SIGTERM 시연), [scripts/retire.py](scripts/retire.py) 실행 |
 | [infra/](infra/) | ACR, managed identity, ACA 환경/앱용 Bicep, probe 정책, [revision-policy.json](infra/revision-policy.json)(종료 유예 180초) |

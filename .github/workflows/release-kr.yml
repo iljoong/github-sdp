@@ -7,10 +7,10 @@ on:
   workflow_dispatch:
     inputs:
       profile:
-        description: demo = educational synthetic short bake; production = 3 x 1h
+        description: quick = 50/100 x 1 min (fastest demo); demo = 10/50/100 x 3 min; production = 3 x 1h
         type: choice
-        options: [demo, production]
-        default: demo
+        options: [quick, demo, production]
+        default: quick
 permissions:
   contents: read
 concurrency:

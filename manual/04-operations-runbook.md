@@ -41,6 +41,9 @@ gh workflow run release.yml --repo $repo --ref main -f profile=demo
 # 운영용 (지역당 3시간 이상, 전체 9시간 이상)
 gh workflow run release.yml --repo $repo --ref main -f profile=production
 
+# 빠른 무중단 검증: build + KR만, quick 프로필(0→50→100%, 단계별 60초, KR 약 5~8분)
+gh workflow run release-kr.yml --repo $repo --ref main
+
 gh run list --repo $repo --workflow release.yml --limit 3
 gh run watch <RELEASE_RUN_ID> --repo $repo
 ```

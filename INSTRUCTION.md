@@ -380,6 +380,14 @@ gh run list --repo $repo --workflow release.yml
 gh run watch '실제-RELEASE-RUN-ID' --repo $repo
 ```
 
+빠른 무중단 검증은 build + KR만 실행하는 `release-kr.yml` 을 씁니다. 기본 `quick`
+프로필은 합성 부하로 candidate를 0 → 50 → 100%, 단계별 60초 관찰합니다(교육용).
+
+```powershell
+gh workflow run release-kr.yml --repo $repo --ref main                 # profile=quick
+gh workflow run release-kr.yml --repo $repo --ref main -f profile=demo # 10/50/100
+```
+
 ### Production 프로필
 
 실서비스의 유기적 트래픽과 SLI가 준비된 경우에만 사용합니다.

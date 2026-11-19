@@ -52,7 +52,7 @@ SERVING ────────────────────────
 | `GET /work` | 기존 business 계약 + health gate 로그 (변경 없음) | 200 | 200 |
 | `GET /api/version` | 화면용 `{version, release, revision, replica, dnsSuffix, app, time}` | 200 | 200 |
 | `GET /status` | `{state, ready, inflight[], drainStartedAt, graceSeconds, graceRemaining, longTaskSeconds, abortOnDrain, revision, replica}` | 200 | 200 |
-| `POST /api/long-task` | `LONG_TASK_SECONDS` 동안 작업 후 `{id, revision, replica, durationMs, completed, result, drainObserved}` | 200 `result: task_completed` (replica당 동시 3개 초과 시 **429**) | 새 요청 **503**. 진행 중 작업은 기본 끝까지 실행(`task_completed`), `LONG_TASK_ABORT_ON_DRAIN=Y` 이면 즉시 200 `task_incompleted` |
+| `POST /api/long-task` | `LONG_TASK_SECONDS` 동안 작업 후 `{id, revision, replica, durationMs, completed, result, drainObserved}` | 200 `result: task_completed` (replica당 동시 3개 초과 시 **429**) | 새 요청 **503**. 진행 중 작업은 기본 deadline(grace − 10초)까지 실행: 그 안에 끝나면 `task_completed`, 아니면 앱 종료로 끊김(오류). `LONG_TASK_ABORT_ON_DRAIN=Y` 이면 즉시 200 `task_incompleted` (6장 6.9) |
 | `GET /verify` | 검증 화면 (`app/verify.html`) | 200 | 200 |
 | `GET /` | 소개 화면 (`app/index.html`): 앱 설명, 현재 버전/상태, Swagger형 endpoint 목록과 **Execute**, System/Light/Dark 테마 | 200 | 200 |
 

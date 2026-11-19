@@ -523,7 +523,8 @@ class SafetyTests(unittest.TestCase):
 
                 with patch.dict(os.environ, {"REGION": "kr", "LOG_ANALYTICS_WORKSPACE_ID": "workspace"}), \
                      patch.dict(rollout.PROFILES, {"production": {
-                         "window": 1, "bake": 1, "lag": 0, "samples": 100, "controls": 30}}), \
+                         "window": 1, "bake": 1, "lag": 0, "samples": 100, "controls": 30,
+                         "stages": (10, 50, 100), "synthetic": False}}), \
                      patch.object(rollout.time, "monotonic", side_effect=lambda: elapsed[0]), \
                      patch.object(rollout.time, "sleep", side_effect=lambda seconds: elapsed.__setitem__(
                          0, elapsed[0] + seconds)), \
@@ -801,6 +802,27 @@ class SafetyTests(unittest.TestCase):
                              sorted(snapshot()["candidate_probes"], key=lambda p: p["type"]))
             self.assertNotIn("latest", copy_command)
 
+    def test_quick_profile_promotes_half_then_full_with_synthetic_load(self):
+        with patch.dict(os.environ, {"GITHUB_RUN_ATTEMPT": "1", "GITHUB_RUN_ID": "123", "REGION": "kr"}), \
+             patch.object(rollout, "verify_context"), patch.object(rollout, "guarded_state"), \
+             patch.object(rollout, "baseline_preflight"), \
+             patch.object(rollout, "cli_app", return_value=[]), patch.object(rollout, "save"), \
+             patch.object(rollout, "candidate_owned"), patch.object(rollout, "ready", return_value=True), \
+             patch.object(rollout, "wait_ready"), patch.object(rollout, "bake", return_value={"p95": 40}) as bake, \
+             patch.object(rollout, "az", side_effect=[[], {}]), \
+             patch.object(rollout, "set_traffic") as traffic:
+            rollout.deploy(snapshot(), "quick")
+            self.assertEqual([c.args[0] for c in traffic.call_args_list],
+                             [{"myapp--old": 50, "myapp--r123": 50},
+                              {"myapp--old": 0, "myapp--r123": 100}])
+            self.assertEqual([c.args[1] for c in bake.call_args_list], ["quick", "quick"])
+        with patch.dict(os.environ, {"REGION": "kr"}), patch.object(rollout, "save"), \
+             patch("builtins.print"), patch.object(rollout.demo_load, "Generator") as generator:
+            with rollout.demo_traffic("quick", snapshot(), "shared.example", 50):
+                pass
+            generator.assert_called_once()
+        self.assertLess(metrics.PROFILES["quick"]["bake"], metrics.PROFILES["demo"]["bake"])
+
     def test_existing_candidate_is_not_blindly_replayed(self):
         with patch.dict(os.environ, {"GITHUB_RUN_ATTEMPT": "1", "GITHUB_RUN_ID": "123", "REGION": "kr"}), \
              patch.object(rollout, "verify_context"), patch.object(rollout, "guarded_state"), \
@@ -1043,6 +1065,8 @@ class SafetyTests(unittest.TestCase):
         self.assertIn("group: safe-aca-production", quick)
         self.assertIn("cancel-in-progress: false", quick)
         self.assertIn("environment: prod-kr", quick)
+        self.assertIn("options: [quick, demo, production]", quick)
+        self.assertIn("default: quick", quick)
         self.assertNotIn("prod-sea", quick)
         self.assertNotIn("prod-usw", quick)
         self.assertIn("workflow_call:", build)

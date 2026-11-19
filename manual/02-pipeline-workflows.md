@@ -9,7 +9,7 @@ release.yml (workflow_dispatch, profile)
  ├─ southeastasia→ region.yml environment: prod-sea   (korea 성공 시)
  └─ westus       → region.yml environment: prod-usw   (sea 성공 시)
 
-release-kr.yml (workflow_dispatch, profile=demo 기본) – 빠른 무중단 검증용
+release-kr.yml (workflow_dispatch, profile=quick 기본) – 빠른 무중단 검증용
  ├─ build        → build.yml  environment: build      (version_prefix k)
  └─ korea        → region.yml environment: prod-kr
 
@@ -52,13 +52,40 @@ demo-retire.yml (workflow_dispatch, source_run_id, region) – 데모 전용
 | 항목 | 값 |
 | --- | --- |
 | 용도 | 데모/검증을 빠르게 반복. `release.yml` 과 같은 build·승인·canary·health gate·evidence, KR 이후 중단 |
-| 트리거 | `workflow_dispatch`, `profile` = `demo`(기본) / `production` |
+| 트리거 | `workflow_dispatch`, `profile` = `quick`(기본) / `demo` / `production` |
 | 동시성 | `safe-aca-production` (release/restore/retire와 같은 lock) |
 | 승인 | `prod-kr` 1회 |
 | 버전 라벨 | `k<run 번호>` (예: `k1`, `k2`) |
 
+| profile | canary (stable:candidate) | 단계별 bake | KR rollout 소요(대략) |
+| --- | --- | --- | --- |
+| `quick` | 100:0 → 50:50 → 0:100 | 60초 (30초 window × 2) | 5~8분 |
+| `demo` | 100:0 → 90:10 → 50:50 → 0:100 | 180초 | 15~20분 |
+| `production` | 100:0 → 90:10 → 50:50 → 0:100 | 3600초 | 3시간+ |
+
+`quick` 도 `release.yml` 과 같은 health gate, 자동 복구, evidence를 쓰고 단계 수와 시간만 줄입니다.
+`release.yml` 의 선택지에는 넣지 않았습니다(3개 지역 운영 배포에는 `demo`/`production` 사용).
+
+PowerShell:
+
 ```powershell
-gh workflow run release-kr.yml --repo <repo> --ref main     # profile=demo
+$repo = 'iljoong/github-sdp'
+gh workflow run release-kr.yml --repo $repo --ref main                       # profile=quick
+gh workflow run release-kr.yml --repo $repo --ref main -f profile=demo       # 10/50/100
+Start-Sleep 5
+$runId = gh run list --repo $repo --workflow release-kr.yml -L 1 --json databaseId -q '.[0].databaseId'
+gh run watch $runId --repo $repo
+```
+
+Bash:
+
+```bash
+repo=iljoong/github-sdp
+gh workflow run release-kr.yml --repo "$repo" --ref main                     # profile=quick
+gh workflow run release-kr.yml --repo "$repo" --ref main -f profile=demo     # 10/50/100
+sleep 5
+run_id=$(gh run list --repo "$repo" --workflow release-kr.yml -L 1 --json databaseId -q '.[0].databaseId')
+gh run watch "$run_id" --repo "$repo"
 ```
 
 주의:

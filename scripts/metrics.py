@@ -4,9 +4,16 @@ from datetime import timedelta
 
 from common import az, iso, require
 
+# stages: candidate weights in order. synthetic: drive demo_load traffic and gate on it
+# (production gates on organic traffic only).
 PROFILES = {
-    "production": {"bake": 3600, "window": 300, "lag": 120, "samples": 100, "controls": 30},
-    "demo": {"bake": 180, "window": 60, "lag": 120, "samples": 20, "controls": 5},
+    "production": {"bake": 3600, "window": 300, "lag": 120, "samples": 100, "controls": 30,
+                   "stages": (10, 50, 100), "synthetic": False},
+    "demo": {"bake": 180, "window": 60, "lag": 120, "samples": 20, "controls": 5,
+             "stages": (10, 50, 100), "synthetic": True},
+    # Fastest educational check (release-kr.yml default): two 30s windows per stage, 50 -> 100.
+    "quick": {"bake": 60, "window": 30, "lag": 60, "samples": 20, "controls": 3,
+              "stages": (50, 100), "synthetic": True},
 }
 
 TELEMETRY_RETRY_SECONDS = 30
@@ -70,7 +77,7 @@ def metric(rows, revision, source, minimum):
 
 def gate(rows, snapshot, profile, weight, stable_reference=None):
     settings = PROFILES[profile]
-    source = "organic" if profile == "production" else "demo"
+    source = "demo" if settings["synthetic"] else "organic"
     stable, candidate = snapshot["stable"], snapshot["candidate"]
     required = [(stable, "control", settings["controls"]),
                 (candidate, "control", settings["controls"]),

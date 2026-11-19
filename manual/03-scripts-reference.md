@@ -307,15 +307,15 @@ GitHub 변수를 흉내 내야 하므로 일반적으로 workflow에서만 실�
 ### 사용법
 
 ```text
-python scripts/rollout.py {deploy|restore} --snapshot <baseline.json> [--profile production|demo]
+python scripts/rollout.py {deploy|restore} --snapshot <baseline.json> [--profile production|demo|quick]
 ```
 
 | 인자 | 설명 |
 | --- | --- |
-| `deploy` | candidate 생성 → 10/50/100% 승격, 실패 시 자동 복구 |
+| `deploy` | candidate 생성 → 프로필의 `stages` 순서로 승격(10/50/100, quick은 50/100), 실패 시 자동 복구 |
 | `restore` | snapshot의 트래픽으로 복원 (evidence: `manual-rollback.json`) |
 | `--snapshot` | `snapshot.py` 결과 파일 (필수) |
-| `--profile` | `production`(기본) / `demo`. `restore` 에서는 무시 |
+| `--profile` | `production`(기본) / `demo` / `quick`. `restore` 에서는 무시 |
 
 ### 필요 환경 변수
 
@@ -331,13 +331,13 @@ python scripts/rollout.py {deploy|restore} --snapshot <baseline.json> [--profile
 2. guarded_state(트래픽 == snapshot.traffic)        ← drift면 복구 없이 중단
 3. candidate 미존재 확인
 4. baseline_preflight (읽기 전용)
-     - demo: curl >= 8.4.0 확인
+     - synthetic 프로필(demo/quick): curl >= 8.4.0 확인
      - stable FQDN 으로 /healthz, /work 직접 확인
      - production: 직전 window의 organic SLO 확인
 5. mutation-intent.json 기록                         ← 이후부터 실패 시 자동 복구
 6. az containerapp update --yaml (template만 PATCH, stable=100 유지)
 7. wait_ready: 최대 600초, candidate Healthy + /healthz, /work 확인
-8. for weight in 10, 50, 100:
+8. for weight in PROFILES[profile]["stages"]:   # (10, 50, 100) / quick: (50, 100)
      - guard + candidate Healthy 확인
      - set_traffic(stable=100-w, candidate=w), 최대 60초 라우팅 반영 확인
      - bake(): 아래 참조
@@ -353,7 +353,7 @@ python scripts/rollout.py {deploy|restore} --snapshot <baseline.json> [--profile
 | 60초 | `guarded_state` + candidate Healthy 재확인 |
 | window 종료 + lag 후 | `metrics.query` → `metrics.gate` 평가, `gate-*.json` 저장 |
 | 텔레메트리 부족 | 30초 후 재조회, 마감 초과 시 실패 |
-| demo | `demo_load.Generator` 가 공유 FQDN에 ~10 rps 부하, 오류 즉시 전파 |
+| demo/quick | `demo_load.Generator` 가 공유 FQDN에 ~10 rps 부하, 오류 즉시 전파 |
 
 ### `restore` 흐름
 
@@ -402,7 +402,7 @@ SLO 및 상대 회귀를 판정합니다. `rollout.py` 가 import하여 사용�
 
 | 이름 | 설명 |
 | --- | --- |
-| `PROFILES` | 프로필별 `bake`, `window`, `lag`, `samples`, `controls` (1장 표 참조) |
+| `PROFILES` | 프로필별 `bake`, `window`, `lag`, `samples`, `controls`, `stages`(canary 단계), `synthetic`(합성 부하로 판정 여부) (1장 표 참조) |
 | `TELEMETRY_RETRY_SECONDS = 30` | 표본 부족 시 재조회 간격 |
 | `TELEMETRY_RETRY_TIMEOUT = 300` | lag 이후 추가 대기 한도 |
 | `IncompleteTelemetry` | "아직 수집 중일 수 있음" 을 나타내는 재시도 가능 예외 |

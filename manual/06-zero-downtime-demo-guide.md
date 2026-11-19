@@ -22,7 +22,7 @@
 | SIGTERM 처리 | 신호 핸들러는 플래그만 세움 → 메인 루프가 `DRAINING` 전환 → 진행 중 작업 종료 후 exit 0 | 신호 핸들러에서 lock을 잡으면 교착(deadlock) 위험. 실제로 이 버그를 테스트로 잡고 수정함 |
 | 종료 유예 | `terminationGracePeriodSeconds = 180` (`infra/revision-policy.json`) | 기본 30초로는 2분 작업이 SIGKILL 됨 |
 | 앱 측 상한 | 긴 작업 ≤ `min(LONG_TASK_SECONDS, GRACE − MARGIN − 5, 230)` | ACA ingress 요청 timeout 240초, SIGKILL 전 여유 |
-| 점진적 전환 | canary 0 → 10 → 50 → 100%, 단계별 bake + Log Analytics health gate | 문제를 일부 트래픽에서 먼저 발견, 실패 시 자동 복구 |
+| 점진적 전환 | canary 0 → 10 → 50 → 100% (quick 프로필: 0 → 50 → 100%), 단계별 bake + Log Analytics health gate | 문제를 일부 트래픽에서 먼저 발견, 실패 시 자동 복구 |
 | 이전 revision 유지 | 운영 release는 이전 revision을 **활성 상태로 남김** | 즉시 restore 가능. 그래서 데모에서는 `demo-retire.yml` 로 따로 SIGTERM을 발생시킴 |
 
 **용어 구분 (실습 중 혼동했던 부분)**
@@ -120,6 +120,101 @@ v1 deactivate → v2 응답 확인) → `demo-retire-evidence-<run>-kr` 업로�
   (`safe-aca-production`)이라 일찍 실행하면 대기하고, `check_source.py` 는 completed run만 허용합니다.
 - 긴 작업 버튼은 retire **직전**에 누릅니다. 이미 DRAINING인 revision은 새 작업을 503으로 거절합니다.
 - 같은 release로 두 번 실행하면 `Stable unavailable` 로 실패합니다(이미 비활성, 추가 조치 불필요).
+
+### 6.3.1 Quick 모드 데모 (KR만, 약 10~15분)
+
+`release-kr.yml` 은 build 후 KR만 배포하고, 기본 프로필 `quick` 으로 canary를
+**stable:candidate = 100:0 → 50:50 → 0:100** 두 단계, 단계별 60초(30초 window × 2)로 진행합니다.
+sea/usw 승인을 기다릴 필요가 없어 KR rollout이 끝나면 곧바로 retire할 수 있습니다.
+
+| 비교 | `release.yml` + demo | `release-kr.yml` + quick |
+| --- | --- | --- |
+| 지역 | kr → sea → usw | kr |
+| 승인 | `prod-kr`, `prod-sea`, `prod-usw` | `prod-kr` |
+| canary (candidate %) | 10 → 50 → 100 | 50 → 100 |
+| 단계별 bake | 180초 | 60초 |
+| 버전 라벨 | `r<N>` | `k<N>` |
+| retire 가능 시점 | 3개 지역 완료 후 (약 45~60분) | KR 완료 후 (약 10분) |
+
+> quick은 교육용입니다. window가 짧고 단계가 적어 회귀 탐지력이 낮습니다. 운영 판단에는
+> `production` 을 쓰세요. 실행 후 SEA/USW는 이전 버전으로 남습니다(지역 간 버전 불일치).
+> retire 후 이전 버전으로 되돌릴 때는 6.6을 따르되 `region=kr` 로 실행합니다.
+
+절차: ① `/verify` 열기 → ② release-kr 실행 → ③ `prod-kr` 승인 → ④ 화면에서 50:50 혼합 → v2 확인,
+run 완료 대기 → ⑤ v1 긴 작업 시작 → ⑥ retire 실행·승인 → ⑦ `DRAINING` → `drainObserved: 예` → `STOPPED`.
+
+**PowerShell**
+
+```powershell
+$repo = 'iljoong/github-sdp'
+
+# 1) release-kr 실행 (profile 생략 시 quick)
+gh workflow run release-kr.yml --repo $repo --ref main
+Start-Sleep 5
+$release = gh run list --repo $repo --workflow release-kr.yml -L 1 --json databaseId -q '.[0].databaseId'
+"release run: $release"
+
+# 2) prod-kr 승인 (UI의 Review deployments 대신 API 사용 가능, 승인자 본인 계정이어야 함)
+$envId = gh api "repos/$repo/environments/prod-kr" -q .id
+do { Start-Sleep 15; $pending = gh api "repos/$repo/actions/runs/$release/pending_deployments" -q 'length' } while ($pending -eq '0')
+gh api -X POST "repos/$repo/actions/runs/$release/pending_deployments" `
+  -F "environment_ids[]=$envId" -f state=approved -f comment='quick demo' | Out-Null
+
+# 3) 완료 대기 (success 확인)
+gh run watch $release --repo $repo --exit-status
+gh run view $release --repo $repo --json status,conclusion
+
+# 4) v1 긴 작업 시작: 화면 버튼 또는 별도 터미널에서 curl (v1 revision FQDN)
+#    curl.exe -sS -X POST -m 240 -w "`nHTTP %{http_code}`n" https://<v1 revision FQDN>/api/long-task
+
+# 5) retire 실행 + 승인 + 대기
+gh workflow run demo-retire.yml --repo $repo --ref main -f source_run_id=$release -f region=kr
+Start-Sleep 5
+$retire = gh run list --repo $repo --workflow demo-retire.yml -L 1 --json databaseId -q '.[0].databaseId'
+do { Start-Sleep 10; $pending = gh api "repos/$repo/actions/runs/$retire/pending_deployments" -q 'length' } while ($pending -eq '0')
+gh api -X POST "repos/$repo/actions/runs/$retire/pending_deployments" `
+  -F "environment_ids[]=$envId" -f state=approved -f comment='quick demo retire' | Out-Null
+gh run watch $retire --repo $repo --exit-status
+```
+
+**Bash**
+
+```bash
+repo=iljoong/github-sdp
+
+# 1) release-kr 실행 (profile 생략 시 quick)
+gh workflow run release-kr.yml --repo "$repo" --ref main
+sleep 5
+release=$(gh run list --repo "$repo" --workflow release-kr.yml -L 1 --json databaseId -q '.[0].databaseId')
+echo "release run: $release"
+
+# 2) prod-kr 승인
+env_id=$(gh api "repos/$repo/environments/prod-kr" -q .id)
+until [ "$(gh api "repos/$repo/actions/runs/$release/pending_deployments" -q 'length')" != 0 ]; do sleep 15; done
+gh api -X POST "repos/$repo/actions/runs/$release/pending_deployments" \
+  -F "environment_ids[]=$env_id" -f state=approved -f comment='quick demo' >/dev/null
+
+# 3) 완료 대기
+gh run watch "$release" --repo "$repo" --exit-status
+gh run view "$release" --repo "$repo" --json status,conclusion
+
+# 4) v1 긴 작업 시작: 화면 버튼 또는 별도 터미널에서
+#    curl -sS -X POST -m 240 -w '\nHTTP %{http_code}\n' https://<v1 revision FQDN>/api/long-task
+
+# 5) retire 실행 + 승인 + 대기
+gh workflow run demo-retire.yml --repo "$repo" --ref main -f source_run_id="$release" -f region=kr
+sleep 5
+retire=$(gh run list --repo "$repo" --workflow demo-retire.yml -L 1 --json databaseId -q '.[0].databaseId')
+until [ "$(gh api "repos/$repo/actions/runs/$retire/pending_deployments" -q 'length')" != 0 ]; do sleep 10; done
+gh api -X POST "repos/$repo/actions/runs/$retire/pending_deployments" \
+  -F "environment_ids[]=$env_id" -f state=approved -f comment='quick demo retire' >/dev/null
+gh run watch "$retire" --repo "$repo" --exit-status
+```
+
+`/verify` 대신 터미널로 보려면 6.4-B 폴링을 같이 실행합니다. quick에서는 50:50 구간이 약 2분이라
+버전이 `r<N>`/`k<N>` 으로 섞이는 시간이 짧습니다.
+
+다른 프로필로 KR만 배포하려면 `-f profile=demo`(10/50/100, 180초) 또는 `-f profile=production` 을 붙입니다.
 
 ## 6.4 테스트 방법
 

@@ -123,7 +123,7 @@ draining replica로 계속 라우팅되는지, 열려 있는 요청이 비활성
 | 시점 | 발표자 행동 | 화면에서 보이는 것 |
 | --- | --- | --- |
 | T0 | `https://<APP FQDN>/verify` 를 연다 | 큰 글자 v1(예: `r41`), 스트립이 v1 색으로 채워짐, v1 카드 `SERVING` |
-| T1 | `gh workflow run release.yml -f profile=demo` 후 kr 승인 (빠르게: `gh workflow run release-kr.yml`, KR만) | 10% → 50% → 100% 동안 스트립이 두 색으로 섞이다가 v2 색으로 바뀜. **오류 0** |
+| T1 | `gh workflow run release.yml -f profile=demo` 후 kr 승인 (빠르게: `gh workflow run release-kr.yml`, KR만·quick 프로필) | 10% → 50% → 100% (quick: 50% → 100%) 동안 스트립이 두 색으로 섞이다가 v2 색으로 바뀜. **오류 0** |
 | T2 | release run이 **전체 완료**될 때까지 기다림 (sea, usw 승인 포함) | v2 카드 등장. v1 카드: 트래픽 0%, `SERVING`, ready ✓ |
 | T3 | v1 카드의 **"긴 작업 시작"** 클릭 | v1 카드에 진행 막대 `0s / 약 120s` |
 | T4 | 즉시 `demo-retire.yml` 실행 후 `prod-kr` 승인 (아래 명령) | — |
@@ -141,7 +141,8 @@ gh run watch <RETIRE_RUN_ID> --repo $repo
 
 - retire는 **release run 전체가 완료된 뒤에만** 가능합니다. 같은 concurrency group
   (`safe-aca-production`)을 쓰고 `check_source.py` 가 completed run만 허용하기 때문입니다.
-  `profile=demo` 를 쓰면 지역당 10~20분이라 대기가 짧습니다.
+  `profile=demo` 를 쓰면 지역당 10~20분이라 대기가 짧습니다. `release-kr.yml`(quick 기본)은
+  KR만 배포하고 끝나므로 약 10분 안에 retire까지 진행할 수 있습니다(6.3.1).
 - T3(버튼)는 release 완료 후, T4 직전에 누릅니다. 120초면 승인 + deactivate에 충분합니다.
 - retire 대상 지역은 그 run의 `evidence/<region>/success.json` 이 있어야 합니다.
 - 화면은 그 지역의 앱 FQDN에서 열어야 합니다(지역마다 앱이 따로 있음).

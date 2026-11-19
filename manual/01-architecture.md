@@ -62,6 +62,9 @@ stable 50 / cand 50   → bake + gate
 stable  0 / cand 100  → bake + gate (stable 기준값은 50% 단계에서 고정)
 ```
 
+`quick` 프로필은 10% 단계를 건너뛰어 `0:100 → 50:50 → 100:0` (stable:candidate) 으로
+진행합니다. 100% 단계의 상대 비교 기준은 똑같이 50% 단계에서 고정합니다.
+
 ## 1.4 안전 장치(Guard) 설계
 
 모든 쓰기 작업 전후로 `common.guarded_state()`가 다음을 검증합니다. 하나라도
@@ -97,19 +100,26 @@ stable  0 / cand 100  → bake + gate (stable 기준값은 50% 단계에서 고�
 | source | 발생 주체 | gate 사용 |
 | --- | --- | --- |
 | `organic` | 실제 사용자 트래픽(헤더 없음) | production 프로필 판정 |
-| `demo` | `demo_load.py` 합성 부하(공유 FQDN) | demo 프로필 판정 |
-| `control` | `rollout.bake` 가 revision FQDN에 직접 보내는 5초 주기 요청 | 양 프로필에서 revision별 생존 확인 |
+| `demo` | `demo_load.py` 합성 부하(공유 FQDN) | demo/quick 프로필 판정 |
+| `control` | `rollout.bake` 가 revision FQDN에 직접 보내는 5초 주기 요청 | 모든 프로필에서 revision별 생존 확인 |
 | `probe` | readiness/preflight/restore 확인 요청 | 판정 제외 |
 
 프로필별 파라미터(`scripts\metrics.py` `PROFILES`):
 
-| 항목 | production | demo |
-| --- | --- | --- |
-| 단계별 bake | 3600초 | 180초 |
-| 평가 window | 300초 | 60초 |
-| 수집 지연(lag) | 120초 | 120초 |
-| candidate/stable 최소 표본 | 100 | 20 |
-| revision별 최소 control 표본 | 30 | 5 |
+| 항목 | production | demo | quick |
+| --- | --- | --- | --- |
+| canary 단계(candidate %) | 10 → 50 → 100 | 10 → 50 → 100 | 50 → 100 |
+| 판정 트래픽 | organic | 합성(demo) | 합성(demo) |
+| 단계별 bake | 3600초 | 180초 | 60초 |
+| 평가 window | 300초 | 60초 | 30초 |
+| 수집 지연(lag) | 120초 | 120초 | 60초 |
+| candidate/stable 최소 표본 | 100 | 20 | 20 |
+| revision별 최소 control 표본 | 30 | 5 | 3 |
+| 지역당 rollout 소요(대략) | 3시간+ | 15~20분 | 5~8분 |
+
+`quick` 은 교육·데모용입니다. window가 짧고 단계가 적어 회귀를 놓칠 확률이 크므로 실제
+운영 판단에는 쓰지 않습니다. 텔레메트리 수집이 lag(60초)보다 늦으면 30초 간격으로 재조회하며
+(최대 300초) 그만큼 시간이 늘어납니다.
 
 판정 기준(모두 충족해야 통과):
 

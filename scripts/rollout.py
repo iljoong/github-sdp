@@ -34,7 +34,7 @@ def request(fqdn, path, source, run, expected_revision=None):
 
 @contextmanager
 def demo_traffic(profile, snapshot, fqdn, weight):
-    if profile != "demo":
+    if not PROFILES[profile]["synthetic"]:
         yield lambda: None
         return
     stop = threading.Event()
@@ -87,14 +87,14 @@ def baseline_preflight(snapshot, profile):
     record = {"started_at": iso(utcnow()), "profile": profile, "run_id": snapshot["run_id"],
               "stable": snapshot["stable"], "status": "checking"}
     try:
-        if profile == "demo":
+        if settings["synthetic"]:
             demo_load.verify_transport()
         guarded_state(snapshot, snapshot["traffic"])
         fqdn = props(revision(snapshot["stable"]))["fqdn"]
         request(fqdn, "/healthz", "probe", snapshot["run_id"], snapshot["stable"])
         request(fqdn, "/work", "probe", snapshot["run_id"], snapshot["stable"])
         record["direct_business_contract"] = "passed"
-        if profile == "production":
+        if not settings["synthetic"]:
             end = utcnow() - timedelta(seconds=settings["lag"])
             start = end - timedelta(seconds=settings["window"])
             rows, kql = query(snapshot, start, end, os.environ["LOG_ANALYTICS_WORKSPACE_ID"])
@@ -171,7 +171,7 @@ def bake(snapshot, profile, weight, expected_weights, stable_reference):
                 next_end += timedelta(seconds=settings["window"])
                 next_query = 0.0
                 attempts = []
-            time.sleep(0.1 if profile == "demo" else 1)
+            time.sleep(0.1 if settings["synthetic"] else 1)
     guarded_state(snapshot, expected_weights)
     return stable_reference
 
@@ -241,7 +241,7 @@ def deploy(snapshot, profile):
         wait_ready(snapshot)
         reference = None
         expected_weights = {snapshot["stable"]: 100}
-        for weight in (10, 50, 100):
+        for weight in PROFILES[profile]["stages"]:
             guarded_state(snapshot, expected_weights)
             require(ready(candidate_owned(snapshot)), "Candidate not Healthy before promotion")
             expected_weights = {snapshot["stable"]: 100 - weight, snapshot["candidate"]: weight}

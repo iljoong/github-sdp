@@ -27,8 +27,8 @@ Environment (read once at startup; invalid values fail fast)
     SHUTDOWN_MARGIN_SECONDS    10    exit this long before SIGKILL
     DRAIN_IDLE_SECONDS         2     linger after the last task so /verify can see it
     LONG_TASK_MAX_CONCURRENT   3     per replica; extra requests get 429
-    LONG_TASK_ABORT_ON_DRAIN   N     Y: answer in-flight long tasks immediately on drain;
-                                     anything else: run them to the end
+    LONG_TASK_ABORT_ON_DRAIN   Y     Y: answer in-flight long tasks immediately on drain;
+                                     anything else: let them run until the drain deadline
     DEMO_LATENCY_MS / DEMO_FAILURE_PERCENT   /work tuning (unchanged)
 """
 import json
@@ -71,7 +71,7 @@ class Settings:
     margin_seconds: int
     idle_seconds: float
     max_concurrent: int
-    abort_on_drain: bool = False
+    abort_on_drain: bool = True
 
     @classmethod
     def from_env(cls, env):
@@ -90,7 +90,7 @@ class Settings:
         # Not capped by grace on purpose: a task longer than the grace lets the
         # demo show the drain outcome (deadline cut-off, or task_incompleted with abort).
         long_task = min(long_task, INGRESS_TIMEOUT_CAP_SECONDS)
-        abort = env.get("LONG_TASK_ABORT_ON_DRAIN", "N").strip().upper() == "Y"
+        abort = env.get("LONG_TASK_ABORT_ON_DRAIN", "Y").strip().upper() == "Y"
         return cls(long_task, grace, margin, idle, limit, abort)
 
 

@@ -128,7 +128,7 @@ docker run --rm -p 8080:8080 safe-demo:local
 짧은 값으로 앱을 실행하고 브라우저에서 `http://localhost:8080/verify` 를 엽니다.
 
 ```powershell
-$env:LONG_TASK_SECONDS = '20'; $env:GRACE_SECONDS = '40'
+$env:LONG_TASK_SECONDS = '20'; $env:GRACE_SECONDS = '40'; $env:LONG_TASK_ABORT_ON_DRAIN = 'N'
 python app\server.py
 ```
 

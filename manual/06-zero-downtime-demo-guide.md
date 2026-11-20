@@ -20,7 +20,7 @@
 | --- | --- | --- |
 | liveness vs readiness | `/healthz`(프로세스 살아 있음) / `/readyz`(새 요청 받을 수 있음) 분리 | drain 중에는 ready=✗ 로 새 트래픽만 빼고, 살아 있으므로 재시작되지 않음 |
 | SIGTERM 처리 | 신호 핸들러는 플래그만 세움 → 메인 루프가 `DRAINING` 전환 → 진행 중 작업 종료 후 exit 0 | 신호 핸들러에서 lock을 잡으면 교착(deadlock) 위험. 실제로 이 버그를 테스트로 잡고 수정함 |
-| 종료 유예 | `terminationGracePeriodSeconds = 30` (`infra/revision-policy.json`, ACA 기본값) | 앱 `GRACE_SECONDS` 도 30으로 맞춤. 긴 작업(120초)은 drain 시 기본이면 20초 deadline에 끊기고, `LONG_TASK_ABORT_ON_DRAIN=Y` 면 즉시 `task_incompleted` 응답 |
+| 종료 유예 | `terminationGracePeriodSeconds = 30` (`infra/revision-policy.json`, ACA 기본값) | 앱 `GRACE_SECONDS` 도 30으로 맞춤. drain 시 기본(`Y`)은 즉시 `task_incompleted`, `N`에서 작업이 20초 안에 끝나지 않으면 연결 끊김 |
 | 앱 측 상한 | 긴 작업 ≤ `min(LONG_TASK_SECONDS, 230)` (grace로는 줄이지 않음) | ACA ingress 요청 timeout 240초, SIGKILL 전 여유 |
 | 점진적 전환 | canary 0 → 10 → 50 → 100% (quick 프로필: 0 → 50 → 100%), 단계별 bake + Log Analytics health gate | 문제를 일부 트래픽에서 먼저 발견, 실패 시 자동 복구 |
 | 이전 revision 유지 | 운영 release는 이전 revision을 **활성 상태로 남김** | 즉시 restore 가능. 그래서 데모에서는 `demo-retire.yml` 로 따로 SIGTERM을 발생시킴 |
@@ -90,7 +90,7 @@ curl.exe -s https://<APP FQDN>/api/version   # version, revision, dnsSuffix 필�
 | 4 | v1 카드 **"긴 작업 시작"** 클릭 (또는 6.4-C curl로 v1 revision FQDN 호출) | 진행 막대 `0s / 약 120s` |
 | 5 | 바로 retire 실행 후 `prod-kr` 승인 (아래) | — |
 | 6 | deactivate → v1 replica SIGTERM | v1 카드 `DRAINING`, ready ✗, grace 30s부터 감소 |
-| 7 | 작업 종료 시 | `완료 … task_completed · drainObserved: 예` (`LONG_TASK_ABORT_ON_DRAIN=Y` 면 즉시 `중단 응답 … task_incompleted`), 약 2초 뒤 v1 카드 `STOPPED` |
+| 7 | 작업 종료 시 | 기본(`Y`)은 즉시 `중단 응답 … task_incompleted`, 약 2초 뒤 v1 카드 `STOPPED`. `N`이고 종료 시한 전에 완료되면 `완료 … task_completed · drainObserved: 예` |
 | 8 | 결과 정리 | 스트립에 빨강 없음, 오류 카운터 0 |
 
 ### retire 명령 상세
@@ -225,7 +225,7 @@ gh run watch "$retire" --repo "$repo" --exit-status
 | 판정 | 조건 |
 | --- | --- |
 | 무중단 배포 성공 | 상단 오류 카운터 0, 스트립에 빨강 칸 없음 |
-| SIGTERM 안전 처리 성공 | 긴 작업 `완료 … task_completed · drainObserved: 예` (또는 abort 옵션 시 `task_incompleted`), 이후 카드 `STOPPED` |
+| SIGTERM 안전 처리 성공 | 기본(`Y`)은 `중단 응답 … task_incompleted`, `N`에서 작업이 시한 안에 끝나면 `완료 … task_completed · drainObserved: 예`, 이후 카드 `STOPPED` |
 | 확인 필요 | `DRAINING` 없이 바로 `UNREACHABLE`, 또는 긴 작업 `실패 … network` (5.9절) |
 
 ### B. 터미널 폴링 (화면 없이 오류 수 측정)
@@ -282,14 +282,14 @@ curl.exe -s https://<revision FQDN>/status
 | 상황 | HTTP | 응답 |
 | --- | --- | --- |
 | 정상 완료 | 200 | `{"completed":true,"result":"task_completed","drainObserved":false,"durationMs":120000,…}` (2026-11-19 KR 실측 형식) |
-| 작업 중 SIGTERM, 기본(`N`), 남은 작업 ≤ deadline(grace − 10초) | 200 | `"result":"task_completed","drainObserved":true` ← grace를 충분히 둔 경우의 **핵심 증거** |
-| 작업 중 SIGTERM, 기본(`N`), 남은 작업 > deadline (grace 30 + 작업 120초) | 오류 | 앱이 drain 20초 뒤 종료 → 응답 없이 연결 끊김(502/503 등, 6.9) |
+| 작업 중 SIGTERM, `N`, 남은 작업 ≤ deadline(grace − 10초) | 200 | `"result":"task_completed","drainObserved":true` ← grace를 충분히 둔 경우의 **핵심 증거** |
+| 작업 중 SIGTERM, `N`, 남은 작업 > deadline (grace 30 + 작업 120초) | 오류 | 앱이 drain 20초 뒤 종료 → 응답 없이 연결 끊김(502/503 등, 6.9) |
 | 작업 중 SIGTERM, 즉시 응답 (`LONG_TASK_ABORT_ON_DRAIN=Y`) | 200 | `"completed":false,"result":"task_incompleted","drainObserved":true` (drain 후 0.2초 이내) |
 | DRAINING 중인 revision에 새 요청 | 503 | `{"error":"draining"}` |
 | replica당 동시 3개 초과 | 429 | `{"error":"too many long tasks"}` |
 
 데모 변형: 터미널 1에서 v1 revision FQDN으로 위 curl 실행 → 터미널 2에서 retire 실행 →
-결과는 6.9의 동작 표를 따릅니다(abort `Y` 면 즉시 `task_incompleted`, 기본이면 grace 30에서 오류).
+결과는 6.9의 동작 표를 따릅니다(기본 `Y` 면 즉시 `task_incompleted`, `N`이고 남은 작업이 종료 시한을 넘으면 오류).
 
 ### D. Azure CLI로 revision 상태 확인
 
@@ -443,7 +443,7 @@ ACA 기본 종료 유예는 30초입니다. 이전에는 2분 작업을 보호�
 | `terminationGracePeriodSeconds` | `infra/revision-policy.json` | 30 | 파이프라인이 template과 앱 env `GRACE_SECONDS` 를 함께 설정. Portal/CLI로 template만 바꾸지 말 것 |
 | `GRACE_SECONDS` | 앱 env | 30 | deadline = drain 시작 + 30 − 10 = **20초** 후 앱 종료 |
 | `LONG_TASK_SECONDS` | 앱 env | 120 | `min(값, 230)`. grace로 줄이지 않음 |
-| `LONG_TASK_ABORT_ON_DRAIN` | 앱 env | 미설정(`N`) | `Y`(대소문자·공백 무관)만 즉시 응답. 파이프라인이 관리하지 않음 |
+| `LONG_TASK_ABORT_ON_DRAIN` | 앱 env | `Y` | 미설정 또는 `Y`(대소문자·공백 무관)이면 즉시 응답. 파이프라인이 관리하지 않음 |
 
 ### drain 중 긴 작업의 결과
 
@@ -451,11 +451,11 @@ ACA 기본 종료 유예는 30초입니다. 이전에는 2분 작업을 보호�
 | --- | --- | --- |
 | drain 없음 | 120초 후 `200 {"completed":true,"result":"task_completed","drainObserved":false}` | `start` → `finish result=task_completed` |
 | drain, `Y` | drain 직후(0.2초 이내) `200 {"completed":false,"result":"task_incompleted","drainObserved":true}` | `start` → `draining` → `finish result=task_incompleted` → `stopped` |
-| drain, 기본 `N`, 남은 작업 > 20초 | drain 20초 뒤 앱 종료로 **오류**(응답 없이 연결 끊김, 게이트웨이 502/503 등). 검증 화면은 `실패 … 사유` | `start` → `draining` → `stopped`(`finish` 없음) |
-| drain, 기본 `N`, 남은 작업 ≤ 20초 | 작업 종료 시 `200 task_completed, drainObserved:true` | `start` → `draining` → `finish` → `stopped` |
+| drain, `N`, 남은 작업 > 20초 | drain 20초 뒤 앱 종료로 **오류**(응답 없이 연결 끊김, 게이트웨이 502/503 등). 검증 화면은 `실패 … 사유` | `start` → `draining` → `stopped`(`finish` 없음) |
+| drain, `N`, 남은 작업 ≤ 20초 | 작업 종료 시 `200 task_completed, drainObserved:true` | `start` → `draining` → `finish` → `stopped` |
 
 > 두 정상 결과 모두 HTTP 200 이므로 클라이언트는 `result` 로 재시도 여부를 판단합니다.
-> 기본 `N` + grace 30의 "오류" 행은 설계상 예상 결과이며, 2026-11-19 기준 라이브에서는 아직 측정하지 않았습니다.
+> `N` + grace 30의 "오류" 행은 설계상 예상 결과이며, 2026-11-19 기준 라이브에서는 아직 측정하지 않았습니다.
 
 ### 시험 방법 (KR)
 
@@ -463,10 +463,10 @@ ACA 기본 종료 유예는 30초입니다. 이전에는 2분 작업을 보호�
 
    ```powershell
    $u='https://safeaca-kr-app.greencoast-9d197771.koreacentral.azurecontainerapps.io'
-   curl.exe -s "$u/status"   # graceSeconds 30, longTaskSeconds 120, abortOnDrain false
+   curl.exe -s "$u/status"   # 현재 revision의 graceSeconds, longTaskSeconds, abortOnDrain 확인
    ```
 
-2. 기본(`N`) — 오류 확인: 6.4-F 절차대로 테스트 revision을 만들고 긴 작업 호출 3초 뒤 deactivate.
+2. `N` — 오류 확인: 6.4-F 절차대로 `LONG_TASK_ABORT_ON_DRAIN=N`을 지정한 테스트 revision을 만들고 긴 작업 호출 3초 뒤 deactivate.
    약 23초 뒤 curl이 오류로 끝나면 기대대로입니다.
 3. `Y` — `task_incompleted` 확인: env를 추가한 revision을 만들어 같은 절차를 반복합니다.
 
@@ -483,8 +483,8 @@ ACA 기본 종료 유예는 30초입니다. 이전에는 2분 작업을 보호�
    curl -s "https://$fqdn/status"
    ```
 
-4. 검증 화면(`/verify`)으로 볼 때는 해당 revision 카드의 "긴 작업 시작"을 누른 뒤 deactivate 합니다.
-   `Y` 는 주황색 `중단 응답 … task_incompleted`, 기본은 `실패 …` 로 표시됩니다.
+4. 검증 화면(`/verify`)에서는 해당 revision 카드에 표시된 `LONG_TASK_ABORT_ON_DRAIN`과 `LONG_TASK_SECONDS`를 확인하고 "긴 작업 시작"을 누른 뒤 deactivate 합니다.
+   `Y` 는 주황색 `중단 응답 … task_incompleted`, `N`에서 남은 작업이 시한을 넘으면 `실패 …` 로 표시됩니다.
 5. 끝나면 테스트 revision을 비활성 상태로 두고(`revision deactivate`) 트래픽이 stable 100%인지 확인합니다.
 
 > `az containerapp update --set-env-vars` 는 앱 template 자체를 바꾸므로 이후 release의 stable
@@ -496,7 +496,7 @@ ACA 기본 종료 유예는 30초입니다. 이전에는 2분 작업을 보호�
 | 항목 | 상태 |
 | --- | --- |
 | SEA/USW grace | 아직 180. `release.yml` 실행 시 30으로 전환 |
-| 기본 `N` + grace 30 오류의 라이브 측정 | 미실시 (위 시험 방법 2) |
+| `N` + grace 30 오류의 라이브 측정 | 미실시 (위 시험 방법 2) |
 | `Y` 의 라이브 측정 | 미실시 (단위 테스트로만 확인, 위 시험 방법 3) |
 | PR #9 단위 테스트 | 요청에 따라 실행 생략. 코드 수정 전 RED만 확인 → 다음 변경 시 `python -m unittest discover -s tests` 실행 권장 |
 | 전체 테스트 간헐 실패 | PR #8 작업 중 5회 중 1회 실패(`ConnectionAbortedError`), 재현 안 됨 |

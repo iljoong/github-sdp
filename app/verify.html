@@ -208,6 +208,8 @@ function ensureCard(revision, version, dnsSuffix) {
   const card = {
     revision, version, url: revisionUrl(revision, dnsSuffix), el, badge,
     share: field(dl, "트래픽 비율"), ready: field(dl, "ready"), grace: field(dl, "grace 남음"),
+    abortOnDrainValue: field(dl, "LONG_TASK_ABORT_ON_DRAIN"),
+    longTaskSecondsValue: field(dl, "LONG_TASK_SECONDS"),
     replica: field(dl, "replica"), endpoint: field(dl, "주소"),
     history: [], lastKnown: null, longTaskSeconds: CONFIG.DEFAULT_LONG_TASK_S, inFlight: false,
   };
@@ -232,7 +234,13 @@ async function pollStatus(card) {
     const s = r.body;
     card.lastKnown = s.state;
     card.history.push({ t, state: s.state });
-    card.longTaskSeconds = s.longTaskSeconds || card.longTaskSeconds;
+    if (typeof s.abortOnDrain === "boolean") {
+      card.abortOnDrainValue.textContent = s.abortOnDrain ? "Y" : "N";
+    }
+    if (typeof s.longTaskSeconds === "number") {
+      card.longTaskSeconds = s.longTaskSeconds;
+      card.longTaskSecondsValue.textContent = s.longTaskSeconds;
+    }
     card.ready.textContent = s.ready ? "✓" : "✗";
     card.grace.textContent = s.graceRemaining == null ? `— (grace ${s.graceSeconds}s)` : `${s.graceRemaining}s`;
     card.replica.textContent = `${s.replica} · 진행 중 작업 ${s.inflight.length}개 (이 replica 기준)`;
@@ -276,7 +284,7 @@ async function startLongTask(card) {
   const started = now();
   const tick = setInterval(() => {
     const elapsed = now() - started;
-    fill.style.width = `${Math.min(99, (elapsed * 100) / expected)}%`;
+    fill.style.width = `${expected > 0 ? Math.min(99, (elapsed * 100) / expected) : 99}%`;
     label.textContent = `긴 작업 진행 중… ${Math.floor(elapsed)}s / 약 ${expected}s`;
   }, 500);
   // 서버 작업 시간 + grace 여유보다 길게 기다린다 (draining 중에도 응답이 와야 성공).

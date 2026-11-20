@@ -43,7 +43,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(defaults.margin_seconds, 10)
         self.assertEqual(defaults.idle_seconds, 2)
         self.assertEqual(defaults.max_concurrent, 3)
-        self.assertIs(defaults.abort_on_drain, False)
+        self.assertIs(defaults.abort_on_drain, True)
         self.assertEqual(server.Settings.from_env(
             {"GRACE_SECONDS": "30", "LONG_TASK_SECONDS": "500"}).long_task_seconds, 230)
         self.assertEqual(server.Settings.from_env(
@@ -216,6 +216,8 @@ class EndpointTests(unittest.TestCase):
             task.result(5)
 
     def test_long_task_completes_and_reports_drain(self):
+        self.httpd.lifecycle = self.lifecycle = server.Lifecycle(server.Settings.from_env(
+            {"LONG_TASK_SECONDS": "0.3", "LONG_TASK_ABORT_ON_DRAIN": "N"}))
         with concurrent.futures.ThreadPoolExecutor(1) as pool:
             task = pool.submit(self.json, "/api/long-task", "POST")
             for _ in range(100):
@@ -231,9 +233,9 @@ class EndpointTests(unittest.TestCase):
         self.assertIs(body["drainObserved"], True)
         self.assertGreaterEqual(body["durationMs"], 300)
 
-    def test_long_task_abort_on_drain_responds_incompleted(self):
+    def test_long_task_aborts_on_drain_by_default(self):
         self.httpd.lifecycle = self.lifecycle = server.Lifecycle(server.Settings.from_env(
-            {"LONG_TASK_SECONDS": "10", "LONG_TASK_ABORT_ON_DRAIN": "Y"}))
+            {"LONG_TASK_SECONDS": "3"}))
         with concurrent.futures.ThreadPoolExecutor(1) as pool:
             task = pool.submit(self.json, "/api/long-task", "POST")
             for _ in range(100):
@@ -243,13 +245,13 @@ class EndpointTests(unittest.TestCase):
             drained = time.monotonic()
             self.lifecycle.begin_drain()
             status, _, body = task.result(5)
-        self.assertLess(time.monotonic() - drained, 1.5)
         self.assertEqual(status, 200)
         self.assertEqual(body["result"], "task_incompleted")
+        self.assertLess(time.monotonic() - drained, 1.5)
         self.assertIs(body["completed"], False)
         self.assertIs(body["drainObserved"], True)
         self.assertEqual(self.lifecycle.status()["inflight"], [])
-        self.assertIs(self.lifecycle.status()["abortOnDrain"], True)
+        self.assertIs(self.json("/status")[2]["abortOnDrain"], True)
         finish = [r for r in printed_records(self.log) if r.get("event") == "finish"]
         self.assertEqual(finish[-1]["result"], "task_incompleted")
 
@@ -320,6 +322,7 @@ class ProcessSignalTests(unittest.TestCase):
     def test_sigterm_drains_then_exits(self):
         port = free_port()
         env = {**os.environ, "PORT": str(port), "LONG_TASK_SECONDS": "2", "GRACE_SECONDS": "20",
+               "LONG_TASK_ABORT_ON_DRAIN": "N",
                "SHUTDOWN_MARGIN_SECONDS": "5", "DRAIN_IDLE_SECONDS": "0.5"}
         process = subprocess.Popen([sys.executable, str(ROOT / "app" / "server.py")], env=env,
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -342,6 +345,7 @@ class ProcessSignalTests(unittest.TestCase):
                 urllib.request.urlopen(base + "/readyz", timeout=2)
             self.assertEqual(caught.exception.code, 503)
             body = task.result(10)
+            self.assertEqual(body["result"], "task_completed")
         self.assertIs(body["drainObserved"], True)
         self.assertEqual(process.wait(6), 0)
         self.assertLess(time.monotonic() - started, 6)

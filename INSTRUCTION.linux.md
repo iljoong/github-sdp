@@ -63,7 +63,7 @@ docker run --rm -p 8080:8080 safe-demo:local
 ### 무중단 종료(SIGTERM drain) 로컬 확인
 
 ```bash
-LONG_TASK_SECONDS=20 GRACE_SECONDS=40 python3 app/server.py &
+LONG_TASK_SECONDS=20 GRACE_SECONDS=40 LONG_TASK_ABORT_ON_DRAIN=N python3 app/server.py &
 pid=$!
 # 브라우저에서 http://localhost:8080/verify 를 열고 "긴 작업 시작" 클릭, 또는:
 curl -s -X POST http://localhost:8080/api/long-task &

@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from dashboard.auth import Actor, APPROVER, OPERATOR, Denied
-from dashboard.github import RemoteError
+from dashboard.github import GitHub, ReadCache, RemoteError
 from dashboard.operations import Command, InvalidAction, Operations
 from dashboard.store import Conflict
 
@@ -85,6 +85,39 @@ class OperationsTests(unittest.TestCase):
         self.assertEqual(outcome["status"], "confirmation_required")
         with self.assertRaises(Conflict):
             self.ops.request(self.operator, Command("deploy", str(uuid4()), profile="production"))
+
+    def test_writes_invalidate_cached_reads_of_the_affected_run(self):
+        calls = []
+
+        def transport(method, url, headers, body):
+            calls.append(url.split("/actions")[1])
+            if "/workflows/" in url or "/runs?" in url:
+                return 200, {}, {"workflow_runs": []}
+            return 200, {}, {"id": int(url.rsplit("/", 1)[1]), "status": "completed"}
+
+        cache = ReadCache(transport, clock=lambda: 0)
+        observer = GitHub("owner/repo", lambda: "token", cache)
+        ops = Operations(self.store, self.workflow, self.reader, cache.invalidate)
+
+        def reads():
+            observer.run(234)
+            observer.run(235)
+            observer.runs(recent=True)
+            observer.active_runs()
+
+        reads()
+        ops.request(self.operator, Command("cancel", self.key, source_run_id=234))
+        reads()
+        active = [f"/runs?branch=main&event=workflow_dispatch&status={status}&per_page=100&page=1"
+                  for status in ("in_progress", "queued", "waiting", "requested", "pending")]
+        self.assertEqual(calls[8:], ["/runs/234", "/workflows/release.yml/runs?branch=main&event=workflow_dispatch&per_page=100&page=1",
+                                     *active])
+        del calls[:]
+        ops.request(self.operator, Command("deploy", str(uuid4()), profile="demo"))
+        ops.review(self.approver, self.store.by_run(234)["operation_id"], "prod-kr", True)
+        observer.run(234)
+        observer.run(235)
+        self.assertEqual(calls, ["/runs/234"])
 
     def test_cancel_does_not_claim_rollback(self):
         outcome = self.ops.request(self.operator, Command("cancel", self.key, source_run_id=234))

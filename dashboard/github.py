@@ -1,16 +1,20 @@
 import base64
 import hashlib
 import json
+import re
 import threading
 import time
 from collections import OrderedDict
+from contextlib import contextmanager
 from datetime import datetime
 
-from .config import ENVIRONMENTS, REGIONS, positive, repository
+from .config import ENVIRONMENTS, OBSERVED_WORKFLOWS, REGIONS, positive, repository
 
 API = "https://api.github.com"
 WORKFLOWS = frozenset({"release.yml", "restore.yml", "demo-retire.yml"})
-OBSERVED_WORKFLOWS = WORKFLOWS | {"release-kr.yml"}
+UNFINISHED = ("in_progress", "queued", "waiting", "requested", "pending")
+RUN_PATH = re.compile(r"/actions/runs/(\d+)(/[^?]*)?(?:\?|$)")
+RUN_LIST = re.compile(r"/actions/(?:workflows/[^/?]+/)?runs(?:\?|$)")
 
 
 class RemoteError(Exception):
@@ -19,12 +23,33 @@ class RemoteError(Exception):
         super().__init__(f"GitHub request failed ({status or 'unconfirmed'})")
 
 
+_client, _client_lock = None, threading.Lock()
+
+
+def _shared_client():
+    global _client
+    import httpx
+
+    with _client_lock:
+        if _client is None:
+            # Long-lived so connections (TLS sessions) are reused; strict: no redirects, no proxy environment.
+            _client = httpx.Client(timeout=12, follow_redirects=False, trust_env=False)
+        return _client
+
+
+def close_transport():
+    global _client
+    with _client_lock:
+        client, _client = _client, None
+    if client is not None:
+        client.close()
+
+
 def transport(method, url, headers, body):
     import httpx
 
     try:
-        with httpx.Client(timeout=12, follow_redirects=False, trust_env=False) as client:
-            response = client.request(method, url, headers=headers, json=body)
+        response = _shared_client().request(method, url, headers=headers, json=body)
     except httpx.HTTPError:
         raise RemoteError() from None
     try:
@@ -35,10 +60,73 @@ def transport(method, url, headers, body):
 
 
 class ReadCache:
-    def __init__(self, send=transport, clock=time.monotonic):
+    """GET cache whose lifetime follows the observed run status (short while active, long once completed)."""
+
+    def __init__(self, send=transport, clock=time.monotonic, active_ttl=5, completed_ttl=300, limit=512):
         self.send, self.clock = send, clock
+        self.active_ttl, self.completed_ttl, self.limit = active_ttl, completed_ttl, limit
         self.cache, self.lock = OrderedDict(), threading.Lock()
+        self.status, self.flights = OrderedDict(), {}
         self.retry_at = 0
+        self.local = threading.local()
+
+    @contextmanager
+    def track(self):
+        """Report the age of the oldest GitHub read served to this thread inside the block."""
+        seen, previous = Observed(), getattr(self.local, "seen", None)
+        self.local.seen = seen
+        try:
+            yield seen
+        finally:
+            self.local.seen = previous
+
+    def _served(self, fetched, ttl):
+        seen = getattr(self.local, "seen", None)
+        if seen is not None:
+            seen.add(self.clock() - fetched, ttl)
+
+    def _remember(self, run_id, status):
+        self.status[run_id] = status
+        self.status.move_to_end(run_id)
+        if len(self.status) > self.limit:
+            self.status.popitem(last=False)
+
+    def _ttl(self, url, body):
+        match = RUN_PATH.search(url)
+        if not match:
+            if RUN_LIST.search(url) and isinstance(body, dict) and isinstance(body.get("workflow_runs"), list):
+                for run in body["workflow_runs"]:
+                    if isinstance(run, dict) and isinstance(run.get("id"), int) and isinstance(run.get("status"), str):
+                        self._remember(run["id"], run["status"])
+            return self.active_ttl
+        run_id = int(match.group(1))
+        if not match.group(2) and isinstance(body, dict) and isinstance(body.get("status"), str):
+            self._remember(run_id, body["status"])
+        return self.completed_ttl if self.status.get(run_id) == "completed" else self.active_ttl
+
+    def _affected(self, url, run_id):
+        match = RUN_PATH.search(url)
+        return bool(RUN_LIST.search(url) or (match and run_id is not None and int(match.group(1)) == int(run_id)))
+
+    def invalidate(self, run_id=None):
+        """Expire cached reads of a run (and all run lists) after a console write or change hint.
+
+        Entries keep their ETag so the next read is a conditional request; reads already in flight
+        are detached so their (possibly older) result is not stored as fresh.
+        """
+        with self.lock:
+            if run_id is not None:
+                self.status.pop(int(run_id), None)
+            for url, (expires, *entry) in self.cache.items():
+                if self._affected(url, run_id):
+                    self.cache[url] = (float("-inf"), *entry)
+            for url in [url for url in self.flights if self._affected(url, run_id)]:
+                del self.flights[url]
+
+    def backoff_remaining(self):
+        """Seconds until GitHub reads are attempted again after a rate-limit response (0 when not limited)."""
+        with self.lock:
+            return max(0, self.retry_at - self.clock())
 
     def __call__(self, method, url, headers, body):
         if method != "GET":
@@ -48,20 +136,44 @@ class ReadCache:
             cached = self.cache.get(url)
             if cached and now < cached[0]:
                 self.cache.move_to_end(url)
+                self._served(cached[2], cached[3])
                 return cached[1]
             if now < self.retry_at:
                 raise RemoteError(429)
-            if cached and cached[1][1].get("etag"):
-                headers = {**headers, "If-None-Match": cached[1][1]["etag"]}
+            flight = self.flights.get(url)
+            leader = flight is None
+            if leader:
+                flight = self.flights[url] = _Flight()
+                if cached and cached[1][1].get("etag"):
+                    headers = {**headers, "If-None-Match": cached[1][1]["etag"]}
+        if not leader:
+            result = flight.join()
+            if result[0] in (200, 304):
+                self._served(self.clock(), self.active_ttl)
+            return result
+        try:
             result = self.send(method, url, headers, body)
-            status, h, body = result
+        except BaseException as error:
+            with self.lock:
+                if self.flights.get(url) is flight:
+                    del self.flights[url]
+            flight.fail(error)
+            raise
+        status, h, body = result
+        with self.lock:
+            current = self.flights.get(url) is flight
+            if current:
+                del self.flights[url]
             if status == 304 and cached:
                 result, status = cached[1], 200
             if status == 200:
-                self.cache[url] = (self.clock() + 30, result)
-                self.cache.move_to_end(url)
-                if len(self.cache) > 256:
-                    self.cache.popitem(last=False)
+                now, ttl = self.clock(), self._ttl(url, result[2]) if current else self.active_ttl
+                self._served(now, ttl)
+                if current:
+                    self.cache[url] = (now + ttl, result, now, ttl)
+                    self.cache.move_to_end(url)
+                    if len(self.cache) > self.limit:
+                        self.cache.popitem(last=False)
             elif status == 429 or (status == 403 and (
                     h.get("retry-after") is not None or h.get("x-ratelimit-remaining") == "0"
                     or (isinstance(body, dict) and "rate limit" in str(body.get("message", "")).lower()))):
@@ -71,7 +183,37 @@ class ReadCache:
                 except (KeyError, ValueError):
                     delay = 60
                 self.retry_at = self.clock() + max(1, delay)
-            return result
+        flight.finish(result)
+        return result
+
+
+class Observed:
+    """Oldest served read age (seconds) and the longest cache lifetime that applied to it."""
+
+    def __init__(self):
+        self.age, self.ttl = None, 0
+
+    def add(self, age, ttl):
+        self.age = max(age, self.age or 0)
+        self.ttl = max(ttl, self.ttl)
+
+
+class _Flight:
+    def __init__(self):
+        self.done, self.result, self.error = threading.Event(), None, None
+
+    def finish(self, result):
+        self.result = result
+        self.done.set()
+
+    def fail(self, error):
+        self.error = error
+        self.done.set()
+
+    def join(self, timeout=30):
+        if not self.done.wait(timeout) or self.error is not None:
+            raise RemoteError(getattr(self.error, "status", None))
+        return self.result
 
 
 def headers(token):
@@ -145,7 +287,8 @@ class GitHub:
     def run(self, run_id):
         return self._call("GET", f"/runs/{positive(run_id)}")[1]
 
-    def _pages(self, path, key, initial="?", pages=5):
+    def _pages(self, path, key, initial="?", pages=5, complete=False):
+        """Up to `pages` pages of 100; with `complete`, a listing that does not end within them is an error."""
         rows = []
         for page in range(1, pages + 1):
             _, data = self._call("GET", f"{path}{initial}per_page=100&page={page}")
@@ -158,6 +301,8 @@ class GitHub:
             rows.extend(batch)
             if len(batch) < 100:
                 return rows
+        if complete:
+            raise RemoteError()
         return rows
 
     def runs(self, workflow="release.yml", recent=False):
@@ -165,6 +310,22 @@ class GitHub:
             raise ValueError("Workflow not allowed")
         return self._pages(f"/workflows/{workflow}/runs?branch=main&event=workflow_dispatch", "workflow_runs",
                            "&", pages=1 if recent else 5)
+
+    def active_runs(self):
+        """Unfinished main dispatch runs of the observed workflows, repository-wide.
+
+        GitHub's `status` filter takes one value, so each unfinished status is listed and paged to the end;
+        any failed or unterminated listing raises so write-time checks fail closed.
+        """
+        paths = {f".github/workflows/{name}" for name in OBSERVED_WORKFLOWS}
+        found = {}
+        for status in UNFINISHED:
+            for run in self._pages(f"/runs?branch=main&event=workflow_dispatch&status={status}", "workflow_runs",
+                                   "&", pages=10, complete=True):
+                if (run.get("status") != "completed" and str(run.get("path", "")).split("@", 1)[0] in paths
+                        and run.get("id") not in found):
+                    found[run.get("id")] = run
+        return list(found.values())
 
     def jobs(self, run_id, attempt):
         return self._pages(f"/runs/{positive(run_id)}/attempts/{positive(attempt)}/jobs", "jobs")

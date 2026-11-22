@@ -1,4 +1,7 @@
+import asyncio
+import json
 import os
+import re
 from contextlib import asynccontextmanager
 from html import escape
 from pathlib import Path
@@ -8,19 +11,23 @@ from urllib.parse import urlencode
 from azure.core.exceptions import AzureError
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
+from starlette.concurrency import run_in_threadpool
 
-from .auth import Denied, EntraSession, actor_from_principal, verify_write_origin
+from .auth import APPROVER, OPERATOR, Denied, EntraSession, actor_from_principal, verify_write_origin
+from .changes import ChangeFeed
 from .config import Settings, positive
 from .evidence import Evidence
-from .github import GitHub, ReadCache, RemoteError, Tokens
+from .github import GitHub, ReadCache, RemoteError, Tokens, close_transport
+from .memo import AzureMemo
 from .observations import DashboardReader, AzureReader
 from .operations import Command, InvalidAction, Operations
 from .store import Conflict, Inbox, OperationsTable, table_clients
 
 STATIC = Path(__file__).with_name("static")
 INDEX = (STATIC / "index.html").read_text(encoding="utf-8")
+SHORT_ROLES = {OPERATOR: "Operator", APPROVER: "Approver"}
 SWITCH_ACCOUNT = "/.auth/logout?" + urlencode({
     "post_logout_redirect_uri": "/.auth/login/aad?" + urlencode({
         "post_login_redirect_uri": "/", "prompt": "select_account",
@@ -52,22 +59,29 @@ async def lifespan(app):
     credential = ManagedIdentityCredential(client_id=os.environ["DASHBOARD_MI_CLIENT_ID"])
     service = table_clients(settings.shared, credential)
     signing = CryptographyClient(settings.signing_key, credential)
+    azure = AzureReader(credential)
     try:
         sign = lambda digest: signing.sign(SignatureAlgorithm.rs256, digest).signature
         shared = settings.shared
         token = Tokens(settings.app_client_id, shared.installation_id, shared.repo_id, sign)
         github = GitHub(shared.repo, token)
-        observer = GitHub(shared.repo, token, ReadCache())
+        read_cache = ReadCache()
+        observer = GitHub(shared.repo, token, read_cache)
         store = OperationsTable(service.get_table_client("dashboardops"), str(shared.repo_id))
         inbox = Inbox(service.get_table_client("dashboardinbox"), str(shared.repo_id))
         app.state.settings = settings
+        app.state.read_cache = read_cache
         app.state.verify_session = EntraSession(settings.tenant_id, settings.entra_client_id)
-        azure = AzureReader(credential)
-        app.state.reader = DashboardReader(shared, settings.targets, observer, Evidence(observer), inbox, store, azure)
+        # Display reads share Azure observations briefly; write-time checks below read Azure directly.
+        app.state.reader = DashboardReader(shared, settings.targets, observer, Evidence(observer), inbox, store,
+                                           AzureMemo(azure), cache=read_cache)
+        app.state.changes = ChangeFeed(inbox, read_cache.invalidate)
         app.state.operations = Operations(store, github, DashboardReader(
-            shared, settings.targets, github, Evidence(github), inbox, store, azure))
+            shared, settings.targets, github, Evidence(github), inbox, store, azure), read_cache.invalidate)
         yield
     finally:
+        azure.close()
+        close_transport()
         signing.close()
         service.close()
         credential.close()
@@ -75,6 +89,9 @@ async def lifespan(app):
 
 def create_app():
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    # (poll interval, connection lifetime) in seconds; the browser's EventSource reconnects after the
+    # lifetime, which re-checks the session and bounds how long one stream holds the server.
+    app.state.stream_timing = (2.0, 300.0)
 
     def actor(request, write=False):
         settings = app.state.settings
@@ -116,10 +133,16 @@ def create_app():
     @app.get("/")
     def index(request: Request):
         user = actor(request)
-        roles = "".join(f'<span class="account-role">{escape(role)}</span>' for role in sorted(user.roles))
-        page = INDEX.replace("{{switch_account}}", escape(SWITCH_ACCOUNT), 1)
-        page = page.replace("{{account_roles}}", roles, 1)
-        return HTMLResponse(page.replace("{{account_name}}", escape(user.display_name or "이름 없는 계정"), 1))
+        roles = [SHORT_ROLES.get(role, role) for role in sorted(user.roles)]
+        name = user.display_name or "이름 없는 계정"
+        alias = user.username.split("@", 1)[0] or (user.display_name.split() or ["계정"])[0]
+        values = {
+            "switch_account": escape(SWITCH_ACCOUNT), "account_name": escape(name), "account_alias": escape(alias),
+            "account_username": escape(user.username), "account_role_text": escape(", ".join(roles)),
+            "account_roles": "".join(f'<span class="account-role">{escape(role)}</span>' for role in roles),
+        }
+        # One pass, so that values taken from the session are never scanned for further placeholders.
+        return HTMLResponse(re.sub(r"\{\{(\w+)\}\}", lambda match: values[match.group(1)], INDEX))
 
     @app.get("/assets/{name}")
     def asset(request: Request, name: Literal["dashboard.css", "dashboard.js"]):
@@ -134,7 +157,31 @@ def create_app():
                 positive(run_id)
             except ValueError:
                 raise InvalidAction("Invalid run ID") from None
+        app.state.changes.poll()
         return app.state.reader.snapshot(user, run_id, region)
+
+    @app.get("/api/changes")
+    async def changes(request: Request):
+        actor(request)
+        feed, (interval, lifetime) = app.state.changes, app.state.stream_timing
+        position = await run_in_threadpool(feed.poll)
+
+        async def stream(position):
+            # Hints only: messages name a run whose state may have changed; the browser re-reads the snapshot.
+            yield "retry: 5000\n\n"
+            deadline = asyncio.get_running_loop().time() + lifetime
+            while asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(interval)
+                if await request.is_disconnected():
+                    return
+                await run_in_threadpool(feed.poll)
+                position, runs = feed.since(position)
+                for run_id in runs:
+                    yield f"event: change\ndata: {json.dumps({'run_id': run_id})}\n\n"
+                if not runs:
+                    yield ": keep-alive\n\n"
+
+        return StreamingResponse(stream(position), media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
     @app.post("/api/operations")
     def operation(request: Request, data: OperationInput):

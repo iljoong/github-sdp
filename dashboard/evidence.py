@@ -1,12 +1,15 @@
+import copy
 import io
 import json
 import re
+import threading
 import zipfile
 from pathlib import PurePosixPath
 from urllib.parse import urlsplit
 
 import httpx
 
+from .config import positive
 from .github import RemoteError
 
 MAX_ZIP = 16 * 1024 * 1024
@@ -69,15 +72,34 @@ def download(url):
 
 
 class Evidence:
-    def __init__(self, github, download_file=download):
-        self.github, self.download_file = github, download_file
+    """Reads one JSON member from a run artifact.
 
-    def file(self, run_id, artifact_name, member):
+    Artifact archives are immutable, so parsed members are cached by (artifact ID, member) for display.
+    The artifact listing is always re-read so expiry is honoured; ``fresh=True`` (write-time checks)
+    bypasses the cache and downloads again.
+    """
+
+    def __init__(self, github, download_file=download, cache_size=256):
+        self.github, self.download_file = github, download_file
+        self.cache_size, self._cache, self._lock = cache_size, {}, threading.Lock()
+
+    def file(self, run_id, artifact_name, member, fresh=False):
         try:
             rows = [row for row in self.github.artifacts(run_id)
                     if row.get("name") == artifact_name and row.get("expired") is False]
             if len(rows) != 1:
                 return None
-            return read_member(self.download_file(self.github.artifact_location(rows[0]["id"])), member)
+            key = (positive(rows[0]["id"]), member)
+            if not fresh:
+                with self._lock:
+                    if key in self._cache:
+                        return copy.deepcopy(self._cache[key])
+            value = read_member(self.download_file(self.github.artifact_location(key[0])), member)
+            with self._lock:
+                self._cache.pop(key, None)
+                while len(self._cache) >= self.cache_size:
+                    self._cache.pop(next(iter(self._cache)))
+                self._cache[key] = value
+            return copy.deepcopy(value)
         except (UnsafeArtifact, RemoteError, ValueError, KeyError, TypeError):
             return None

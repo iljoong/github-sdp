@@ -21,6 +21,7 @@ class Actor:
     object_id: str
     roles: frozenset[str]
     display_name: str = field(default="", compare=False)
+    username: str = field(default="", compare=False)
 
 
 def actor_from_principal(header: str | None, tenant_id: str) -> Actor:
@@ -45,12 +46,14 @@ def actor_from_principal(header: str | None, tenant_id: str) -> Actor:
         kind = claim("idtyp", MS + "idtyp")
         # Easy Auth can also authenticate client applications. Require a user claim
         # when the Entra token does not carry an explicit identity type.
+        names = [value.strip() for name in ("preferred_username", "upn", SOAP + "upn")
+                 for value in sorted(claims.get(name, ())) if value.strip()]
         has_user_name = any(claims.get(name) for name in ("preferred_username", "upn", SOAP + "upn"))
         if tenant != tenant_id or not roles or (kind != "user" and (kind or not has_user_name)):
             raise ValueError
     except (AttributeError, KeyError, TypeError, ValueError, UnicodeError, binascii.Error):
         raise Denied("An assigned Entra user role is required") from None
-    return Actor(tenant, oid, roles)
+    return Actor(tenant, oid, roles, username=next(iter(names), ""))
 
 
 def authorize(actor: Actor, role: str) -> None:

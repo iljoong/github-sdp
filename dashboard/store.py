@@ -34,6 +34,33 @@ class Inbox:
             "PartitionKey eq @p and RowKey ge @low and RowKey lt @high",
             parameters={"p": self.partition, "low": f"{run_id}:", "high": f"{run_id};"}))
 
+    # Change hints live beside protection-rule rows under their own prefixes: `chgid:<delivery>` makes a
+    # delivery insert-once, and `chg:<UTC time>:<delivery>` orders hints by arrival for the change cursor.
+    def put_change(self, change):
+        try:
+            self.table.create_entity({"PartitionKey": self.partition, "RowKey": f"chgid:{change.delivery_id}"})
+        except ResourceExistsError:
+            return False
+        received = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        self.table.create_entity({
+            "PartitionKey": self.partition, "RowKey": f"chg:{received}:{change.delivery_id}",
+            "delivery_id": change.delivery_id, "run_id": str(change.run_id), "run_attempt": change.run_attempt,
+            "kind": change.kind, "action": change.action, "received_at": received})
+        return True
+
+    def changes(self, after="chg:", limit=200):
+        """Change hints whose row key sorts after `after` (a `chg:` row key or `chg:<UTC time>`), oldest first."""
+        rows = self.table.query_entities(
+            "PartitionKey eq @p and RowKey gt @low and RowKey lt @high",
+            parameters={"p": self.partition, "low": after, "high": "chg;"},
+            select=["RowKey", "delivery_id", "run_id", "run_attempt", "kind", "action", "received_at"])
+        result = []
+        for row in rows:
+            result.append({**row, "run_id": int(row["run_id"])})
+            if len(result) >= limit:
+                break
+        return result
+
 
 class OperationsTable:
     def __init__(self, table, partition):

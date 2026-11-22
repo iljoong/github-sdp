@@ -1,3 +1,5 @@
+import asyncio
+import json
 import os
 from contextlib import asynccontextmanager
 from html import escape
@@ -8,10 +10,12 @@ from urllib.parse import urlencode
 from azure.core.exceptions import AzureError
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
+from starlette.concurrency import run_in_threadpool
 
 from .auth import Denied, EntraSession, actor_from_principal, verify_write_origin
+from .changes import ChangeFeed
 from .config import Settings, positive
 from .evidence import Evidence
 from .github import GitHub, ReadCache, RemoteError, Tokens, close_transport
@@ -66,6 +70,7 @@ async def lifespan(app):
         app.state.verify_session = EntraSession(settings.tenant_id, settings.entra_client_id)
         azure = AzureReader(credential)
         app.state.reader = DashboardReader(shared, settings.targets, observer, Evidence(observer), inbox, store, azure)
+        app.state.changes = ChangeFeed(inbox, read_cache.invalidate)
         app.state.operations = Operations(store, github, DashboardReader(
             shared, settings.targets, github, Evidence(github), inbox, store, azure), read_cache.invalidate)
         yield
@@ -78,6 +83,9 @@ async def lifespan(app):
 
 def create_app():
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    # (poll interval, connection lifetime) in seconds; the browser's EventSource reconnects after the
+    # lifetime, which re-checks the session and bounds how long one stream holds the server.
+    app.state.stream_timing = (2.0, 300.0)
 
     def actor(request, write=False):
         settings = app.state.settings
@@ -137,7 +145,31 @@ def create_app():
                 positive(run_id)
             except ValueError:
                 raise InvalidAction("Invalid run ID") from None
+        app.state.changes.poll()
         return app.state.reader.snapshot(user, run_id, region)
+
+    @app.get("/api/changes")
+    async def changes(request: Request):
+        actor(request)
+        feed, (interval, lifetime) = app.state.changes, app.state.stream_timing
+        position = await run_in_threadpool(feed.poll)
+
+        async def stream(position):
+            # Hints only: messages name a run whose state may have changed; the browser re-reads the snapshot.
+            yield "retry: 5000\n\n"
+            deadline = asyncio.get_running_loop().time() + lifetime
+            while asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(interval)
+                if await request.is_disconnected():
+                    return
+                await run_in_threadpool(feed.poll)
+                position, runs = feed.since(position)
+                for run_id in runs:
+                    yield f"event: change\ndata: {json.dumps({'run_id': run_id})}\n\n"
+                if not runs:
+                    yield ": keep-alive\n\n"
+
+        return StreamingResponse(stream(position), media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
     @app.post("/api/operations")
     def operation(request: Request, data: OperationInput):

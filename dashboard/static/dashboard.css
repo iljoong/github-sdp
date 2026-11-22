@@ -61,6 +61,7 @@ main.wrap { padding-block: 26px 56px }
 #inbox { margin-bottom: 15px }
 #inbox-list { margin: 0 }
 #inbox-list li { border-bottom: 0 }
+#inbox-truncated { color: var(--muted) }
 .request .reason { color: var(--warn) }
 .request .actions .command { margin-bottom: 0 }
 .layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); align-items: start; gap: 15px; margin-top: 15px }

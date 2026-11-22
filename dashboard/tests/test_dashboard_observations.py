@@ -388,6 +388,12 @@ class RegionProgressTests(unittest.TestCase):
         self.assertEqual({r: regions[r]["traffic_stage"] for r in regions}, {"kr": 50, "sea": 10, "usw": 0})
         self.assertEqual(regions["kr"]["job"], "in_progress")
 
+    def test_regions_name_their_container_app_for_the_resource_tree(self):
+        console = Console()
+        console.azure_down = {"usw"}
+        regions = console.snapshot(region="sea")["regions"]
+        self.assertEqual({r: regions[r]["app"] for r in regions}, {"kr": "app-kr", "sea": "app-sea", "usw": "app-usw"})
+
     def test_traffic_stage_is_unknown_without_azure_or_a_release(self):
         console = Console()
         console.azure_down = {"kr"}
@@ -398,6 +404,83 @@ class RegionProgressTests(unittest.TestCase):
         console.runs.clear()
         console.now += 10
         self.assertIsNone(console.snapshot()["regions"]["sea"]["traffic_stage"])
+
+
+OPERATOR_ACTOR = SimpleNamespace(roles={"ReleaseOperator"}, object_id="operator")
+
+
+class ReleaseHistoryTests(unittest.TestCase):
+    def test_history_lists_start_profile_commit_requester_duration_and_conclusion(self):
+        console = Console()
+        console.runs[7].update(run_started_at=iso(T0 - 60), updated_at=iso(T0 - 5))
+        console.runs[6] = {**release_run(6, "completed"), "head_sha": "d" * 40, "conclusion": "failure",
+                           "run_started_at": iso(T0 - 3600), "updated_at": iso(T0 - 3000)}
+        console.ops = [{"operation_id": "o7", "kind": "deploy", "status": "accepted", "run_id": 7, "actor": "a7",
+                        "actor_name": "Kim", "profile": "demo", "created_at": iso(T0 - 61)},
+                       {"operation_id": "o6", "kind": "deploy", "status": "accepted", "run_id": 6, "actor": "a6",
+                        "profile": "production", "created_at": iso(T0 - 3601)}]
+        history = console.snapshot(run_id=7)["history"]
+        self.assertEqual([{k: entry[k] for k in ("id", "status", "conclusion", "started_at", "profile", "commit",
+                                                 "requester", "duration_seconds", "url")} for entry in history], [
+            {"id": 7, "status": "in_progress", "conclusion": None, "started_at": iso(T0 - 60), "profile": "demo",
+             "commit": SHA, "requester": "Kim", "duration_seconds": 60,
+             "url": "https://github.com/owner/repo/actions/runs/7"},
+            {"id": 6, "status": "completed", "conclusion": "failure", "started_at": iso(T0 - 3600),
+             "profile": "production", "commit": "d" * 40, "requester": None, "duration_seconds": 600,
+             "url": "https://github.com/owner/repo/actions/runs/6"}])
+
+    def test_history_entries_carry_rollback_and_retire_reasons(self):
+        console = Console("completed")
+        console.runs[6] = release_run(6, "completed")
+        console.runs[5] = {**release_run(5, "completed"), "run_attempt": 2}
+        history = {entry["id"]: entry["actions"] for entry in console.snapshot(run_id=7, actor=OPERATOR_ACTOR)["history"]}
+        unverified = "The deployment baseline is unavailable, expired or unverified"
+        self.assertEqual(history[7], {"rollback": unverified, "retire": unverified})
+        self.assertEqual(history[6], {"rollback": "Select this release to verify its recovery evidence",
+                                      "retire": "Select this release to verify its recovery evidence"})
+        attempt = "The original release must be completed on its first attempt"
+        self.assertEqual(history[5], {"rollback": attempt, "retire": attempt})
+        viewer = console.snapshot(run_id=7)["history"]
+        self.assertEqual(viewer[1]["actions"]["rollback"], "ReleaseOperator role required")
+
+
+class EventTimelineTests(unittest.TestCase):
+    def test_timeline_merges_jobs_approval_requests_decisions_and_audit_in_time_order(self):
+        console = Console()
+        console.jobs[7] = [
+            {"name": "build / build", "status": "completed", "conclusion": "success",
+             "started_at": iso(T0 - 290), "completed_at": iso(T0 - 200)},
+            {"name": "korea / rollout", "status": "in_progress", "conclusion": None,
+             "started_at": iso(T0 - 50), "completed_at": None}]
+        console.rules[7] = [{"environment": "prod-kr", "sha": SHA, "received_at": iso(T0 - 150)}]
+        console.ops = [
+            {"operation_id": "o7", "kind": "deploy", "status": "accepted", "run_id": 7, "actor": "a1",
+             "actor_name": "Kim", "created_at": iso(T0 - 300)},
+            {"operation_id": "d1", "kind": "approve", "status": "accepted", "source_run_id": 7, "environment": "prod-kr",
+             "actor": "a2", "actor_name": "Lee", "created_at": iso(T0 - 100)},
+            {"operation_id": "x", "kind": "cancel", "status": "accepted", "source_run_id": 99, "actor": "a3",
+             "created_at": iso(T0 - 10)}]
+        timeline = console.snapshot(run_id=7)["timeline"]
+        self.assertEqual([(e["at"], e["kind"], e["name"], e["status"], e["region"], e["actor_name"]) for e in timeline], [
+            (iso(T0 - 300), "deploy", None, "accepted", None, "Kim"),
+            (iso(T0 - 290), "job_started", "build / build", None, None, None),
+            (iso(T0 - 200), "job_completed", "build / build", "success", None, None),
+            (iso(T0 - 150), "approval_requested", None, None, "kr", None),
+            (iso(T0 - 100), "approve", None, "accepted", "kr", "Lee"),
+            (iso(T0 - 50), "job_started", "korea / rollout", None, "kr", None)])
+        self.assertEqual(timeline[4]["environment"], "prod-kr")
+        self.assertEqual(timeline[4]["actor"], "a2")
+
+    def test_timeline_keeps_only_the_newest_entries(self):
+        console = Console()
+        console.ops = []
+        console.jobs[7] = [{"name": f"step {n}", "status": "completed", "conclusion": "success",
+                            "started_at": iso(T0 - 1000 + 2 * n), "completed_at": iso(T0 - 999 + 2 * n)}
+                           for n in range(40)]
+        timeline = console.snapshot(run_id=7)["timeline"]
+        self.assertEqual(len(timeline), 50)
+        self.assertEqual(timeline[0]["at"], iso(T0 - 1000 + 30))
+        self.assertEqual(timeline[-1]["at"], iso(T0 - 999 + 78))
 
 
 class ActiveWorkflowTests(unittest.TestCase):

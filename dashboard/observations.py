@@ -20,6 +20,13 @@ API_VERSION = "2024-03-01"
 ENV_KEYS = frozenset({"RELEASE_ID", "GRACE_SECONDS", "LONG_TASK_SECONDS", "LONG_TASK_ABORT_ON_DRAIN"})
 JOB_PREFIX = {"kr": "korea", "sea": "southeastasia", "usw": "westus"}
 SOURCE_ERRORS = (AzureError, RemoteError, httpx.HTTPError, ValueError, TypeError, KeyError)
+TIMELINE_LIMIT = 50
+KINDS = frozenset({"deploy", "cancel", "rollback", "retire", "approve", "reject"})
+
+
+def _env_region(environment):
+    region = str(environment or "").rsplit("-", 1)[-1]
+    return region if region in JOB_PREFIX else None
 
 
 def _iso(seconds):
@@ -380,7 +387,7 @@ class DashboardReader:
         gh_available, audit_available = True, True
         run, baseline, current, states, audit, progress = None, None, None, {}, [], {}
         recent, pending, restored, retired, cancelled = [], [], None, None, False
-        active_runs, inbox = [], []
+        active_runs, inbox, jobs = [], [], []
         try:
             recent = [row for row in self.github.runs(recent=True)
                       if self._run_matches(row, row.get("id"), "release.yml")]
@@ -409,6 +416,7 @@ class DashboardReader:
         for name, observation in regions.items():
             observation["progress"] = progress.get(name, dict(empty))
             observation["traffic_stage"] = traffic_stage(observation.get("candidate_weight"))
+            observation["app"] = self.targets[name].app_name
 
         audit_read = False
         try:
@@ -450,17 +458,24 @@ class DashboardReader:
             pending, inbox = [], []
 
         active = bool(active_runs) if gh_available else True
+
+        def blocked(action):
+            if OPERATOR not in actor.roles:
+                return "ReleaseOperator role required"
+            if unresolved or not gh_available:
+                return "A write is unresolved or GitHub state is unavailable"
+            if action != "cancel" and active:
+                return "A protected workflow is still active"
+            return None
+
         reasons = {}
         for action in ("deploy", "cancel", "rollback", "retire"):
-            if OPERATOR not in actor.roles:
-                reason = "ReleaseOperator role required"
-            elif unresolved or not gh_available:
-                reason = "A write is unresolved or GitHub state is unavailable"
+            reason = blocked(action)
+            if reason:
+                pass
             elif action == "cancel":
                 reason = ("A cancellation was already accepted" if cancelled else
                           None if run and run.get("status") != "completed" else "No active release selected")
-            elif active:
-                reason = "A protected workflow is still active"
             elif action == "deploy":
                 reason = None
             elif not run:
@@ -473,11 +488,77 @@ class DashboardReader:
             reasons[action] = reason
         public = ("operation_id", "kind", "status", "created_at", "actor", "actor_name", "source_run_id", "run_id",
                   "environment", "region")
+        ops = [*audit, *([current] if current else [])]
         return {"run": ({**self._view_run(run), "profile": current.get("profile") if current else None} if run else None),
                 "runs": [self._view_run(row) for row in recent[:20]], "regions": regions, "build": states.get("build", "unknown"),
+                "history": self._history(recent[:20], run, ops, reasons, blocked, now),
+                "timeline": self._timeline(run, jobs, ops) if run else [],
                 "pending": pending, "inbox": inbox, "actions": reasons, "audit": [{k: row[k] for k in public if k in row} for row in audit],
                 "restored": restored is True, "retired": retired is True, "observed_at": stamp(),
                 "github_available": gh_available, "audit_available": audit_available, "_audit_read": audit_read}
+
+    def _history(self, rows, selected, ops, reasons, blocked, now):
+        """Release history entries; recovery reasons are fully evaluated only for the selected release."""
+        owners = {}
+        for op in ops:
+            if op.get("kind") == "deploy" and op.get("run_id"):
+                owners.setdefault(op["run_id"], op)
+        result = []
+        for row in rows:
+            op = owners.get(row["id"], {})
+            start = _epoch(row.get("run_started_at") or row.get("created_at"))
+            end = _epoch(row.get("updated_at")) if row.get("status") == "completed" else now
+            actions = {}
+            for action in ("rollback", "retire"):
+                if selected and row["id"] == selected["id"]:
+                    actions[action] = reasons[action]
+                elif row.get("status") != "completed" or row.get("run_attempt") != 1:
+                    actions[action] = blocked(action) or "The original release must be completed on its first attempt"
+                else:
+                    actions[action] = blocked(action) or "Select this release to verify its recovery evidence"
+            result.append({**self._view_run(row), "started_at": _iso(start) if start is not None else None,
+                           "profile": op.get("profile"), "commit": row.get("head_sha"),
+                           "requester": op.get("actor_name"),
+                           "duration_seconds": int(max(0, end - start)) if start is not None and end is not None else None,
+                           "actions": actions})
+        return result
+
+    def _timeline(self, run, jobs, ops, limit=TIMELINE_LIMIT):
+        """Bounded, time-ordered merge of job transitions, approval requests and console audit for one run."""
+        events = []
+
+        def add(at, kind, name=None, status=None, environment=None, region=None, op=None):
+            moment = _epoch(at)
+            if moment is not None:
+                events.append((moment, {"at": _iso(moment), "kind": kind, "name": name, "status": status,
+                                        "environment": environment, "region": region,
+                                        "actor": (op or {}).get("actor"), "actor_name": (op or {}).get("actor_name")}))
+
+        regions = {prefix: region for region, prefix in JOB_PREFIX.items()}
+        for job in jobs:
+            name = str(job.get("name", ""))
+            region = regions.get(name.split(" / ", 1)[0].strip().lower())
+            add(job.get("started_at"), "job_started", name, region=region)
+            if job.get("status") == "completed":
+                add(job.get("completed_at"), "job_completed", name, job.get("conclusion"), region=region)
+        try:
+            rules = self.inbox.rules(run["id"])
+        except SOURCE_ERRORS:
+            rules = []
+        for rule in rules:
+            env = rule.get("environment")
+            add(rule.get("received_at"), "approval_requested", environment=env, region=_env_region(env))
+        seen = set()
+        for op in ops:
+            if (op.get("operation_id") in seen or op.get("kind") not in KINDS
+                    or run["id"] not in (op.get("run_id"), op.get("source_run_id"))):
+                continue
+            seen.add(op.get("operation_id"))
+            env = op.get("environment")
+            add(op.get("created_at"), op["kind"], status=op.get("status"), environment=env,
+                region=op.get("region") or _env_region(env), op=op)
+        events.sort(key=lambda event: event[0])
+        return [event for _, event in events[-limit:]]
 
     def _inbox(self, actor, pending, active_runs, selected, unresolved, limit=10):
         """Waiting gates of every console-started run that is still active, plus the selected run's gates."""

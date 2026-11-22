@@ -36,8 +36,15 @@ const reasonText = {
   "A cancellation was already accepted": "GitHub에 취소 요청이 이미 접수되었습니다.",
   "Current traffic belongs to a different release": "현재 트래픽이 다른 릴리스에 연결되어 있습니다.",
   "Retire requires verified demo evidence and candidate traffic at 100%": "검증된 demo 증거와 후보 트래픽 100%가 필요합니다.",
-  "The candidate is not verified healthy": "후보 리비전의 헬스를 확인할 수 없습니다."
+  "The candidate is not verified healthy": "후보 리비전의 헬스를 확인할 수 없습니다.",
+  "Select this release to verify its recovery evidence": "이 릴리스를 선택하면 복구 근거를 확인합니다."
 };
+const allowedBecause = {
+  rollback: "검증된 기준 스냅샷 · 이전 리비전 활성/정상 · 현재 트래픽이 이 릴리스에 속함",
+  retire: "검증된 demo 증거 · 후보 트래픽 100% · 후보와 이전 리비전 정상"
+};
+const eventText = {job_started: "시작", approval_requested: "승인 요청"};
+const regionKeys = {Digit1: "kr", Digit2: "sea", Digit3: "usw", Numpad1: "kr", Numpad2: "sea", Numpad3: "usw"};
 const healthBadges = {healthy: "✓ 정상", progressing: "⟳ 진행 중", degraded: "✕ 저하", waiting: "⏸ 대기", unknown: "? 미확인"};
 const sourceReasons = {rate_limited: "GitHub 호출 제한", upstream_error: "조회 실패", not_produced: "응답 없음"};
 // Polling intervals (ms): a safety net while the change stream is connected, fast while a release or
@@ -48,7 +55,7 @@ const baseTitle = document.title;
 
 let selected = "kr", seq = 0, selectedRun = "", timer, soonTimer, writing = false, callback;
 let data = null, receivedAt = 0, errors = 0, live = true, stream = null, streamOpen = false, streamOpened = false;
-let streamRetryAt = 0, nextPollAt = 0, seenInbox = null;
+let streamRetryAt = 0, nextPollAt = 0, seenInbox = null, typedRegion = null;
 const decided = new Map();
 const signatures = new WeakMap();
 
@@ -62,8 +69,8 @@ function text(value) {
   return value == null ? "미확인" : value === true ? "예" : value === false ? "아니요" : String(value);
 }
 
-function dictionary(fields) {
-  const dl = node("dl");
+function dictionary(fields, dl = node("dl")) {
+  dl.replaceChildren();
   for (const [label, value] of Object.entries(fields)) dl.append(node("dt", label), node("dd", text(value)));
   return dl;
 }
@@ -145,21 +152,6 @@ function revision({row, candidate, baseline}, previous) {
       "실행 / 프로비전": `${text(row.running)} / ${text(row.provisioning)}`,
       "레플리카 (현재 / 최소 / 최대)": `${text(row.replica_count)} / ${text(row.scale?.minReplicas)} / ${text(row.scale?.maxReplicas)}`
     }));
-  if (row.replicas?.length) {
-    const table = node("table");
-    const header = table.createTHead().insertRow();
-    for (const entry of ["Azure 레플리카", "컨테이너 준비 상태", "HTTP 관찰"]) header.append(node("th", entry));
-    const body = table.createTBody();
-    for (const replica of row.replicas) {
-      const tr = body.insertRow();
-      tr.append(node("td", replica.name), node("td", replica.containers.map(c => `${c.name}: ${text(c.ready)} (재시작 ${text(c.restartCount)})`).join(", ") || "미확인"),
-        node("td", row.sample?.replica === replica.name ? text(row.sample.state) : "미관찰"));
-    }
-    const container = node("div"); container.className = "scroll"; container.append(table); section.append(container);
-    container.scrollLeft = previous?.querySelector(".scroll")?.scrollLeft ?? 0;
-  } else {
-    section.append(node("p", row.replicas ? "현재 레플리카가 없습니다." : "레플리카 목록 미관찰"));
-  }
   const details = node("details");
   details.open = Boolean(previous?.querySelector("details")?.open);
   details.append(node("summary", "주요 ENV · /verify 관찰값"));
@@ -186,6 +178,137 @@ function summary(region) {
   box.append(dictionary(Object.fromEntries(Object.entries(region.traffic ?? {}).map(([name, weight]) => [name, `${weight}%`]))),
     node("small", "설정 트래픽은 HTTP 표본 비율이나 배포 검증 결과가 아닙니다."));
   return box;
+}
+
+function readiness(ready) { return ready === true ? "healthy" : ready === false ? "degraded" : "unknown"; }
+
+function combined(states) {
+  if (!states.length) return "unknown";
+  return states.includes("degraded") ? "degraded" : states.every(s => s === "healthy") ? "healthy" : "unknown";
+}
+
+function revisionHealth(row) {
+  if (row.active === false || row.health == null) return "unknown";
+  return row.health === "Healthy" ? "healthy" : "degraded";
+}
+
+// One tree node (li) with a health badge, name, detail and a child list; an existing node is updated in place
+// so that unchanged children (keyed by revision, replica and container) keep their DOM.
+function treeItem(previous, kind, state, title, detail) {
+  const item = previous ?? node("li");
+  if (!previous) {
+    const badge = node("span"); badge.className = "badge";
+    item.append(badge, node("strong"), node("small"), node("ul"));
+  }
+  const [badge, name, info] = item.children;
+  item.dataset.node = kind;
+  item.dataset.health = badge.dataset.health = state;
+  badge.textContent = healthBadges[state];
+  name.textContent = title;
+  info.textContent = detail;
+  return item;
+}
+
+function containerNode(c, previous) {
+  return treeItem(previous, "container", readiness(c.ready), c.name ?? "컨테이너",
+    `준비 ${text(c.ready)} · 재시작 ${text(c.restartCount)} · ${text(c.runningState)}`);
+}
+
+const observedText = {azure: "Azure 목록 · HTTP 응답 없음", http: "HTTP 응답만 · Azure 목록에 없음", both: "Azure 목록 · HTTP 응답"};
+
+function replicaNode({replica, observed, sample}, previous) {
+  const containers = replica.containers ?? [];
+  const state = observed === "http" ? readiness(sample?.ready) : combined(containers.map(c => readiness(c.ready)));
+  const item = treeItem(previous, "replica", state, replica.name,
+    observedText[observed] + (sample ? ` · 응답 상태 ${text(sample.state)}` : ""));
+  item.dataset.observed = observed;
+  keyed(item.lastElementChild, containers.map((c, index) => [`${c.name ?? index}`, c]), containerNode);
+  return item;
+}
+
+function revisionNode({row, traffic, role}, previous) {
+  const item = treeItem(previous, "revision", revisionHealth(row), row.name,
+    [role, `트래픽 ${traffic}%`, row.active === false ? "비활성" : row.active ? "활성" : "활성 미확인", `헬스 ${text(row.health)}`]
+      .filter(Boolean).join(" · "));
+  const listed = row.replicas ?? [];
+  const sampled = row.sample?.replica;
+  const entries = listed.map(r => [`replica:${r.name}`, {replica: r, observed: r.name === sampled ? "both" : "azure",
+    sample: r.name === sampled ? row.sample : null}]);
+  if (sampled && !listed.some(r => r.name === sampled)) {
+    entries.push([`replica:${sampled}`, {replica: {name: sampled, containers: []}, observed: "http", sample: row.sample}]);
+  }
+  if (!entries.length) entries.push(["note", row.replicas ? "현재 레플리카가 없습니다." : "레플리카 목록 미관찰"]);
+  keyed(item.lastElementChild, entries, (value, prev, key) => {
+    if (key !== "note") return replicaNode(value, prev);
+    const note = node("li", value); note.dataset.node = "note"; return note;
+  });
+  return item;
+}
+
+function tree(region, previous) {
+  const box = previous ?? node("div");
+  if (!previous) {
+    box.id = "tree"; box.className = "tree";
+    const root = node("ul"); root.setAttribute("aria-label", "앱, 리비전, 레플리카, 컨테이너");
+    box.append(node("h3", "리소스 트리"), root);
+  }
+  const rows = region.revisions ?? [];
+  const serving = rows.filter(row => (region.traffic?.[row.name] ?? 0) > 0).map(revisionHealth);
+  keyed(box.querySelector("ul"), [["app", region]], (value, prev) => {
+    const app = treeItem(prev, "app", combined(serving), value.app ?? "앱 미확인", `Container App · prod-${selected}`);
+    keyed(app.lastElementChild, rows.map(row => [row.name, {row, traffic: value.traffic?.[row.name] ?? 0,
+      role: row.name === value.candidate ? "후보" : row.name === value.baseline ? "이전" : ""}]), revisionNode);
+    return app;
+  });
+  return box;
+}
+
+function selectRun(value) {
+  selectedRun = value;
+  navigate();
+  refresh(true, true);
+}
+
+function selectRegion(key) {
+  selected = key;
+  document.querySelectorAll("[data-region]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.region === key)));
+  navigate();
+  refresh(true, true);
+}
+
+function historyEntry({entry, current}) {
+  const item = node("li");
+  if (current) item.setAttribute("aria-current", "true");
+  const head = node("div"); head.className = "spread";
+  head.append(node("strong", `#${entry.id} · ${label(entry.conclusion || entry.status)}`));
+  if (!current) {
+    const pick = node("button", "선택"); pick.type = "button"; pick.className = "select";
+    pick.setAttribute("aria-label", `릴리스 #${entry.id} 선택`);
+    pick.onclick = () => selectRun(String(entry.id));
+    head.append(pick);
+  }
+  item.append(head,
+    node("small", `시작 ${timestamp(entry.started_at)} · 소요 ${entry.duration_seconds == null ? "미확인" : duration(entry.duration_seconds)} · 프로필 ${entry.profile ?? "미확인"}`),
+    node("small", `커밋 ${entry.commit?.slice(0, 7) ?? "미확인"} · 요청자 ${entry.requester ?? "미확인"}`));
+  const actions = node("div"); actions.className = "actions";
+  actions.append(...["rollback", "retire"].map(kind => commandButton(kind, entry.actions?.[kind], entry.id)));
+  item.append(actions);
+  return item;
+}
+
+function timelineEntry(event) {
+  const item = node("li");
+  item.dataset.kind = event.kind;
+  const title = event.kind === "job_started" ? `${event.name} ${eventText.job_started}`
+    : event.kind === "job_completed" ? `${event.name} ${label(event.status)}`
+    : event.kind === "approval_requested" ? `${event.environment} ${eventText.approval_requested}`
+    : [labels[event.kind] ?? event.kind, event.environment ?? (event.region ? `prod-${event.region}` : null), label(event.status)]
+      .filter(Boolean).join(" · ");
+  item.append(node("span", title), node("small", timestamp(event.at)));
+  if (event.actor || event.actor_name) {
+    item.append(node("small", [event.actor_name, event.actor ? `Entra 사용자 ${event.actor}` : null].filter(Boolean).join(" · ")));
+  }
+  return item;
 }
 
 function commandButton(kind, reason, runId, gate, explain = true) {
@@ -272,6 +395,8 @@ function render(snapshot) {
   if (region.unavailable) entries.push(["unavailable", true]);
   else {
     entries.push(["summary", {observed_at: region.observed_at, candidate_weight: region.candidate_weight, traffic: region.traffic}]);
+    entries.push(["tree", {app: region.app, traffic: region.traffic, candidate: region.candidate, baseline: region.baseline,
+                           revisions: region.revisions}]);
     for (const row of region.revisions ?? []) entries.push([`revision:${row.name}`, {row, candidate: region.candidate, baseline: region.baseline}]);
     if (snapshot.restored) entries.push(["restored", true]);
     if (snapshot.retired) entries.push(["retired", true]);
@@ -280,6 +405,7 @@ function render(snapshot) {
     if (key === "title") return node("h2", `${regionNames[value]} · prod-${value}`);
     if (key === "unavailable") return node("p", "Azure에서 이 지역을 조회할 수 없습니다.");
     if (key === "summary") return summary(value);
+    if (key === "tree") return tree(value, previous);
     if (key === "restored") return node("p", "복구 근거와 이전 리비전 100% 트래픽을 확인했습니다.");
     if (key === "retired") return node("p", "종료 근거와 이전 리비전 비활성을 확인했습니다.");
     return revision(value, previous);
@@ -294,6 +420,15 @@ function render(snapshot) {
       node("small", row.actor_name ? `${row.actor_name} · Entra 사용자 ${row.actor}` : `Entra 사용자 ${row.actor}`));
     return entry;
   });
+  const current = String(run?.id ?? "");
+  keyed($("history"), (snapshot.history ?? []).map(entry => [String(entry.id), {entry, current: String(entry.id) === current}]),
+    historyEntry);
+  const seen = new Map();
+  keyed($("timeline"), (snapshot.timeline ?? []).map(event => {
+    const base = [event.at, event.kind, event.name, event.environment, event.actor].join("|");
+    seen.set(base, (seen.get(base) ?? 0) + 1);
+    return [`${base}|${seen.get(base)}`, event];
+  }), timelineEntry);
   renderInbox();
   tick();
 }
@@ -402,13 +537,14 @@ function soon() {
 
 // Reused command nodes keep whatever a previous lock set, so re-derive enabled state after each render.
 function enableCommands() {
-  document.querySelectorAll("#operations button, #inbox-list button").forEach(button => {
+  document.querySelectorAll("#operations button, #inbox-list button, #history .command button").forEach(button => {
     button.disabled = Boolean(button.dataset.blocked) || writing;
   });
 }
 
 function disableActions() {
-  document.querySelectorAll("#operations button, #inbox-list button, #deploy").forEach(button => { button.disabled = true; });
+  document.querySelectorAll("#operations button, #inbox-list button, #history .command button, #deploy")
+    .forEach(button => { button.disabled = true; });
 }
 
 async function refresh(clearMessage = true, selectionChanged = false) {
@@ -444,16 +580,44 @@ async function refresh(clearMessage = true, selectionChanged = false) {
   }
 }
 
+function recoveryContext(kind, runId, region) {
+  const r = data?.regions?.[region] ?? {};
+  const serving = Object.entries(r.traffic ?? {}).filter(([, weight]) => weight > 0)
+    .map(([name, weight]) => `${name} ${weight}%`).join(", ") || "미확인";
+  return {
+    "원본 릴리스": `#${runId}`,
+    "지역": `${region.toUpperCase()} · ${regionNames[region]} · prod-${region}`,
+    "현재 트래픽": serving,
+    "변경 후": kind === "rollback" ? `${r.baseline ?? "이전 리비전"} 100%`
+      : `${r.candidate ?? "후보 리비전"} 100% 유지 · ${r.baseline ?? "이전 리비전"} 비활성화`,
+    "허용 근거": allowedBecause[kind]
+  };
+}
+
+function typedOk() { return !typedRegion || $("typed").value.trim().toLowerCase() === typedRegion; }
+function checkTyped() { $("confirm-apply").disabled = !typedOk(); }
+
 function confirm(kind, runId, gate) {
   if (writing) return;
   const region = selected;
+  const recovery = ["rollback", "retire"].includes(kind);
   $("confirm-title").textContent = labels[kind];
-  $("confirm-detail").textContent = [runId ? `실행 #${runId}` : "", gate?.environment ?? (["rollback", "retire"].includes(kind) ? regionNames[region] : ""), descriptions[kind]].filter(Boolean).join(" · ");
+  $("confirm-detail").textContent = [runId ? `실행 #${runId}` : "", gate?.environment ?? (recovery ? regionNames[region] : ""), descriptions[kind]].filter(Boolean).join(" · ");
   $("profile-row").hidden = kind !== "deploy";
   $("profile").value = "demo";
+  // Rollback and retire change production traffic: show the full context and require the typed region code.
+  $("confirm-context").hidden = !recovery;
+  if (recovery) dictionary(recoveryContext(kind, runId, region), $("confirm-context"));
+  else $("confirm-context").replaceChildren();
+  typedRegion = recovery ? region : null;
+  $("typed-row").hidden = !recovery;
+  $("typed").value = "";
+  $("typed-code").textContent = region;
+  checkTyped();
   callback = () => submit(kind, runId, region, gate);
   $("confirm").returnValue = "close";
   $("confirm").showModal();
+  if (recovery) $("typed").focus();
 }
 
 async function submit(kind, runId, region, gate) {
@@ -533,22 +697,26 @@ function setLive(value) {
   }
 }
 
-$("release").onchange = () => { selectedRun = $("release").value; navigate(); refresh(true, true); };
+$("release").onchange = () => selectRun($("release").value);
 $("deploy").onclick = () => confirm("deploy", null, null);
 $("refresh").onclick = () => refresh();
 $("live").onclick = () => setLive(!live);
 $("notify").hidden = !window.Notification;
 $("notify").onclick = toggleNotifications;
 $("notify").setAttribute("aria-pressed", String(notificationsOn()));
-$("confirm").addEventListener("close", () => { if ($("confirm").returnValue === "apply") callback(); });
-for (const el of document.querySelectorAll("[data-region]")) {
-  el.onclick = () => {
-    selected = el.dataset.region;
-    document.querySelectorAll("[data-region]").forEach(b => b.setAttribute("aria-pressed", String(b === el)));
-    navigate();
-    refresh(true, true);
-  };
-}
+$("typed").addEventListener("input", checkTyped);
+$("confirm").addEventListener("close", () => { if ($("confirm").returnValue === "apply" && typedOk()) callback(); });
+for (const el of document.querySelectorAll("[data-region]")) el.onclick = () => selectRegion(el.dataset.region);
+// Shortcuts use physical keys (event.code) so they also work with a Korean keyboard layout.
+document.addEventListener("keydown", event => {
+  if (event.defaultPrevented || event.repeat || event.ctrlKey || event.metaKey || event.altKey || $("confirm").open) return;
+  if (event.target.closest?.("input, select, textarea, [contenteditable]")) return;
+  if (regionKeys[event.code]) selectRegion(regionKeys[event.code]);
+  else if (event.code === "KeyR") refresh();
+  else if (event.code === "KeyL") setLive(!live);
+  else return;
+  event.preventDefault();
+});
 window.addEventListener("popstate", () => { readLocation(); refresh(true, true); });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {

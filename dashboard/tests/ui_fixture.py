@@ -6,6 +6,7 @@ Fixture controls (unauthenticated, fixture only):
   POST /__fixture/change     {"run_id": n} announce a change on the SSE stream
   POST /__fixture/stream     {"enabled": bool} break (and refuse) or restore the SSE stream
   GET  /__fixture/requests   /api/dashboard calls so far as [{"run_id", "region"}]
+  GET  /__fixture/writes     POST /api/operations commands so far as [{"action", "source_run_id", "region"}]
 """
 import copy
 import sys
@@ -38,16 +39,21 @@ class Feed:
 
 def fixture_app(port):
     app = create_app()
-    state = {"snapshot": None, "requests": []}
+    state = {"snapshot": None, "requests": [], "writes": []}
     feed = Feed()
     app.state.settings = SimpleNamespace(tenant_id=TENANT, origin=f"http://127.0.0.1:{port}")
     app.state.verify_session = lambda token: Actor(
         TENANT, USER, frozenset({OPERATOR, APPROVER}), display_name="Fixture") if token == "fixture" else None
     app.state.changes = feed
     app.state.stream_timing = (0.2, 300.0)
+
+    def request(actor, command):
+        state["writes"].append({"action": command.action, "source_run_id": command.source_run_id,
+                                "region": command.region})
+        return {"status": "accepted", "run_id": 901} if command.action == "deploy" else {"status": "accepted"}
+
     app.state.operations = SimpleNamespace(
-        request=lambda actor, command: {"status": "accepted", "run_id": 901} if command.action == "deploy" else {"status": "accepted"},
-        review=lambda actor, operation_id, environment, approved: {"status": "accepted"})
+        request=request, review=lambda actor, operation_id, environment, approved: {"status": "accepted"})
 
     def snapshot(actor, run_id, region):
         state["requests"].append({"run_id": run_id, "region": region})
@@ -82,6 +88,10 @@ def fixture_app(port):
     @app.get("/__fixture/requests")
     def requests():
         return state["requests"]
+
+    @app.get("/__fixture/writes")
+    def writes():
+        return state["writes"]
 
     return app
 

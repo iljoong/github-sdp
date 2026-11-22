@@ -4,7 +4,8 @@ Usage (system Python with Playwright; the fixture server runs under the dashboar
   python dashboard/tests/ui_smoke.py --server-python <dashboard venv python> [--headed]
 Covers: approval inbox across regions + tab-title badge + notifications, health/step/traffic-stage badges,
 per-source freshness, stream update, polling fallback, Live/Pause/refresh, deep link + back button,
-incremental render preserving open sections, scroll and the release picker.
+incremental render preserving open sections, scroll and the release picker, resource tree, events timeline,
+release history with per-entry actions, typed-region confirmation, keyboard shortcuts, dark theme, mobile width.
 The fixture server logs one ConnectionAbortedError traceback when the smoke deliberately breaks the stream.
 """
 import argparse
@@ -40,18 +41,30 @@ def progress(step=None, started=None):
             "elapsed_seconds": started, "failed_step": None, "log_url": None}
 
 
-def revision(name, weight):
+def revision(name, weight, sample_replica=None):
     return {"name": name, "active": True, "health": "Healthy", "running": "Running", "provisioning": "Provisioned",
             "replica_count": 1, "scale": {"minReplicas": 1, "maxReplicas": 3}, "env": {"APP_VERSION": name},
             "replicas": [{"name": f"{name}-rep", "containers": [{"name": "app", "ready": True, "restartCount": 0}]}],
-            "sample": None, "weight": weight}
+            "sample": {"replica": sample_replica, "ready": True, "state": "ready"} if sample_replica else None,
+            "weight": weight}
 
 
 def region(job, weight, step=None, started=None, revisions=()):
-    return {"job": job, "observed_at": iso(2), "candidate": "app--r7", "baseline": "app--r5",
+    return {"job": job, "observed_at": iso(2), "candidate": "app--r7", "baseline": "app--r5", "app": "app",
             "candidate_weight": weight, "traffic": {"app--r7": weight, "app--r5": 100 - weight},
             "traffic_stage": max(s for s in (0, 10, 50, 100) if weight >= s), "progress": progress(step, started),
             "revisions": list(revisions)}
+
+
+def history_entry(run_id, status, conclusion, started, profile, commit, requester, reason):
+    return {"id": run_id, "status": status, "conclusion": conclusion, "head_sha": commit, "url": None,
+            "started_at": iso(started), "profile": profile, "commit": commit, "requester": requester,
+            "duration_seconds": 300 if status != "completed" else 1500, "actions": {"rollback": reason, "retire": reason}}
+
+
+def event(seconds_ago, kind, **fields):
+    return {"at": iso(seconds_ago), "kind": kind, "name": None, "status": None, "environment": None, "region": None,
+            "actor": None, "actor_name": None, **fields}
 
 
 def gate(operation_id, run_id, region_key, reason=None, kind="deploy"):
@@ -73,9 +86,19 @@ def snapshot(**changes):
         "regions": {
             "kr": region("success", 100),
             "sea": region("in_progress", 50, "Bake at 50%", 65,
-                          [revision("app--r7", 50), revision("app--r5", 50)] + [revision(f"app--r{n}", 0) for n in (1, 2, 3)]),
+                          [revision("app--r7", 50, "app--r7-http"), revision("app--r5", 50, "app--r5-rep")]
+                          + [revision(f"app--r{n}", 0) for n in (1, 2, 3)]),
             "usw": region("waiting", 0),
         },
+        "history": [history_entry(501, "in_progress", None, 300, "demo", "abcdef1234", "Kim Operator",
+                                  "A protected workflow is still active"),
+                    history_entry(480, "completed", "success", 7200, "production", "1234567abc", None,
+                                  "Select this release to verify its recovery evidence")],
+        "timeline": [event(400, "deploy", status="accepted", actor="u1", actor_name="Kim Operator"),
+                     event(350, "job_completed", name="build / build", status="success"),
+                     event(200, "approval_requested", environment="prod-kr", region="kr"),
+                     event(100, "approve", status="accepted", environment="prod-kr", region="kr", actor="u2",
+                           actor_name="Lee Approver")],
         "pending": [],
         "inbox": [gate("op-usw", 501, "usw"),
                   gate("op-kr-rb", 610, "kr", "A different Entra approver is required", kind="rollback")],
@@ -176,6 +199,40 @@ def run(fixture, headed, screenshot=None):
             page.wait_for_timeout(2100)
             assert page.locator("#freshness [data-source=audit]").inner_text() != first, "freshness does not tick"
             check("per-source freshness ticks and warns when stale")
+
+            tree = page.locator("#tree")
+            expect(tree.locator("[data-node=app]")).to_contain_text("app")
+            expect(tree.locator("[data-node=revision]")).to_have_count(5)
+            r7 = tree.locator("[data-node=revision]").filter(has_text="app--r7")
+            r5 = tree.locator("[data-node=revision]").filter(has_text="app--r5")
+            expect(r7.locator("[data-node=replica][data-observed=azure]")).to_contain_text("app--r7-rep")
+            expect(r7.locator("[data-node=replica][data-observed=http]")).to_contain_text("app--r7-http")
+            expect(r5.locator("[data-node=replica]")).to_have_count(1)
+            expect(r5.locator("[data-node=replica]")).to_have_attribute("data-observed", "both")
+            expect(r5.locator("[data-node=container]")).to_have_attribute("data-health", "healthy")
+            expect(r5).to_have_attribute("data-health", "healthy")
+            check("resource tree app > revision > replica > container; Azure-listed vs HTTP-observed")
+
+            events = page.locator("#timeline > li")
+            expect(events).to_have_count(4)
+            expect(events.first).to_contain_text("새 배포")
+            expect(events.first).to_contain_text("Kim Operator")
+            expect(events.nth(2)).to_contain_text("prod-kr 승인 요청")
+            expect(events.last).to_contain_text("Lee Approver")
+            expect(events.last).to_have_attribute("data-kind", "approve")
+            check("events timeline in time order with display names")
+
+            entries = page.locator("#history > li")
+            expect(entries).to_have_count(2)
+            current = page.locator("#history > li[data-key='501']")
+            expect(current).to_have_attribute("aria-current", "true")
+            for fragment in ("Kim Operator", "demo", "abcdef1", "5분"):
+                expect(current).to_contain_text(fragment)
+            past = page.locator("#history > li[data-key='480']")
+            for fragment in ("production", "1234567", "25분", "릴리스를 선택"):
+                expect(past).to_contain_text(fragment)
+            expect(past.get_by_role("button", name="롤백 요청")).to_be_disabled()
+            check("release history with start, profile, commit, requester, duration and disabled reasons")
             if screenshot:
                 page.screenshot(path=screenshot, full_page=True)
 
@@ -243,6 +300,71 @@ def run(fixture, headed, screenshot=None):
             page.wait_for_timeout(500)
             assert fx.call("GET", "/__fixture/requests")[-1] == {"run_id": 501, "region": "sea"}
             check("URL tracks release/region; back button restores them")
+
+            recovery = snapshot(run={"id": 480, "status": "completed", "conclusion": "success", "head_sha": "1234567abc",
+                                     "url": None, "profile": "production", "run_attempt": 1}, inbox=[],
+                                actions={"deploy": None, "cancel": "No active release selected", "rollback": None,
+                                         "retire": "Retire requires verified demo evidence and candidate traffic at 100%"})
+            recovery["regions"]["kr"].update(candidate_weight=100, traffic={"app--r7": 100, "app--r5": 0})
+            select = "Select this release to verify its recovery evidence"
+            recovery["history"][0]["actions"] = {"rollback": select, "retire": select}
+            recovery["history"][1]["actions"] = {"rollback": None, "retire": recovery["actions"]["retire"]}
+            fx.call("PUT", "/__fixture/snapshot", recovery)
+            past.get_by_role("button", name="선택").click()
+            expect(page).to_have_url(f"{fx.origin}/?run=480&region=sea")
+            page.evaluate("document.activeElement.blur()")
+            page.keyboard.press("1")
+            expect(page).to_have_url(f"{fx.origin}/?run=480&region=kr")
+            expect(page.locator("[data-region=kr]")).to_have_attribute("aria-pressed", "true")
+            count = len(fx.call("GET", "/__fixture/requests"))
+            page.keyboard.press("r")
+            page.wait_for_function(f"fetch('/__fixture/requests').then(r => r.json()).then(r => r.length > {count})")
+            page.keyboard.press("l")
+            expect(page.locator("#live")).to_have_attribute("aria-pressed", "false")
+            page.keyboard.press("l")
+            expect(page.locator("#live")).to_have_attribute("aria-pressed", "true")
+            check("keyboard shortcuts: region keys, R refresh, L live/pause")
+
+            expect(past).to_have_attribute("aria-current", "true")
+            expect(past.get_by_role("button", name="이전 리비전 종료")).to_be_disabled()
+            expect(past).to_contain_text("demo 증거")
+            past.get_by_role("button", name="롤백 요청").click()
+            dialog = page.locator("dialog#confirm")
+            for fragment in ("#480", "prod-kr", "app--r7 100%", "app--r5 100%", "기준 스냅샷"):
+                expect(dialog.locator("#confirm-context")).to_contain_text(fragment)
+            apply = dialog.locator("#confirm-apply")
+            expect(apply).to_be_disabled()
+            typed = dialog.locator("#typed")
+            typed.press_sequentially("sea")
+            expect(apply).to_be_disabled()
+            typed.fill("")
+            typed.press_sequentially("kr")
+            expect(apply).to_be_enabled()
+            expect(page).to_have_url(f"{fx.origin}/?run=480&region=kr")
+            apply.click()
+            page.wait_for_function("fetch('/__fixture/writes').then(r => r.json()).then(w => w.length > 0)")
+            assert fx.call("GET", "/__fixture/writes") == [{"action": "rollback", "source_run_id": 480, "region": "kr"}]
+            check("history rollback needs the typed region code and shows full context")
+
+            def luminance(selector):
+                return page.evaluate("""s => { const [r, g, b] = getComputedStyle(document.querySelector(s))
+                    .backgroundColor.match(/[0-9.]+/g).map(Number); return (r + g + b) / 3; }""", selector)
+
+            assert luminance("body") > 180 and luminance(".panel") > 180, "light theme is not light"
+            page.emulate_media(color_scheme="dark")
+            assert luminance("body") < 60 and luminance(".panel") < 60, "dark theme does not follow the OS setting"
+            assert page.evaluate("(([r, g, b]) => (r + g + b) / 3)(getComputedStyle(document.body).color.match(/[0-9.]+/g).map(Number))") > 180
+            if screenshot:
+                page.screenshot(path=screenshot.replace(".png", "-dark.png"), full_page=True)
+            page.emulate_media(color_scheme="light")
+            check("prefers-color-scheme dark theme")
+
+            page.set_viewport_size({"width": 375, "height": 740})
+            page.wait_for_timeout(300)
+            assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), "horizontal overflow on mobile"
+            for selector in ("#history", "#timeline", "#tree", "#inbox"):
+                expect(page.locator(selector)).to_be_visible()
+            check("mobile width without horizontal overflow")
             assert not violations, violations
             check("no CSP violations or page errors")
         finally:

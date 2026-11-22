@@ -36,6 +36,7 @@
       <button type="button" id="refresh">새로고침</button>
       <button type="button" id="notify" aria-pressed="false">승인 요청 알림</button>
       <span id="connection" data-mode="starting">연결 중</span>
+      <small id="shortcuts">단축키: 1·2·3 지역 · R 새로고침 · L 실시간/일시정지</small>
     </div>
     <p id="message" role="status">배포 정보를 불러오는 중입니다.</p>
     <ul id="freshness" class="freshness" aria-label="출처별 관찰 시각"></ul>
@@ -62,15 +63,29 @@
         <ol id="audit"></ol>
       </aside>
     </div>
+    <div class="layout">
+      <section class="panel" aria-labelledby="history-title">
+        <h2 id="history-title">릴리스 이력</h2>
+        <ol id="history"></ol>
+      </section>
+      <section class="panel" aria-labelledby="timeline-title">
+        <h2 id="timeline-title">이벤트 타임라인</h2>
+        <ol id="timeline"></ol>
+      </section>
+    </div>
   </main>
   <dialog id="confirm">
     <form method="dialog">
       <h2 id="confirm-title"></h2>
       <p id="confirm-detail"></p>
+      <dl id="confirm-context" hidden></dl>
       <p id="profile-row" hidden><label for="profile">프로필</label>
         <select id="profile"><option value="demo">demo</option><option value="production">production</option></select>
       </p>
-      <footer class="actions"><button value="close" autofocus>닫기</button><button class="primary" value="apply">확인</button></footer>
+      <p id="typed-row" hidden><label for="typed">확인하려면 지역 코드 <strong id="typed-code"></strong>를 입력하세요</label>
+        <input id="typed" autocomplete="off" spellcheck="false" autocapitalize="off">
+      </p>
+      <footer class="actions"><button value="close" autofocus>닫기</button><button id="confirm-apply" class="primary" value="apply">확인</button></footer>
     </form>
   </dialog>
 </body>

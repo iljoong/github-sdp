@@ -5,6 +5,7 @@ import re
 import threading
 import time
 from collections import OrderedDict
+from contextlib import contextmanager
 from datetime import datetime
 
 from .config import ENVIRONMENTS, REGIONS, positive, repository
@@ -67,6 +68,22 @@ class ReadCache:
         self.cache, self.lock = OrderedDict(), threading.Lock()
         self.status, self.flights = OrderedDict(), {}
         self.retry_at = 0
+        self.local = threading.local()
+
+    @contextmanager
+    def track(self):
+        """Report the age of the oldest GitHub read served to this thread inside the block."""
+        seen, previous = Observed(), getattr(self.local, "seen", None)
+        self.local.seen = seen
+        try:
+            yield seen
+        finally:
+            self.local.seen = previous
+
+    def _served(self, fetched, ttl):
+        seen = getattr(self.local, "seen", None)
+        if seen is not None:
+            seen.add(self.clock() - fetched, ttl)
 
     def _remember(self, run_id, status):
         self.status[run_id] = status
@@ -96,9 +113,9 @@ class ReadCache:
         with self.lock:
             if run_id is not None:
                 self.status.pop(int(run_id), None)
-            for url, (expires, result) in self.cache.items():
+            for url, (expires, *entry) in self.cache.items():
                 if self._affected(url, run_id):
-                    self.cache[url] = (float("-inf"), result)
+                    self.cache[url] = (float("-inf"), *entry)
             for url in [url for url in self.flights if self._affected(url, run_id)]:
                 del self.flights[url]
 
@@ -115,6 +132,7 @@ class ReadCache:
             cached = self.cache.get(url)
             if cached and now < cached[0]:
                 self.cache.move_to_end(url)
+                self._served(cached[2], cached[3])
                 return cached[1]
             if now < self.retry_at:
                 raise RemoteError(429)
@@ -125,7 +143,10 @@ class ReadCache:
                 if cached and cached[1][1].get("etag"):
                     headers = {**headers, "If-None-Match": cached[1][1]["etag"]}
         if not leader:
-            return flight.join()
+            result = flight.join()
+            if result[0] in (200, 304):
+                self._served(self.clock(), self.active_ttl)
+            return result
         try:
             result = self.send(method, url, headers, body)
         except BaseException as error:
@@ -141,11 +162,14 @@ class ReadCache:
                 del self.flights[url]
             if status == 304 and cached:
                 result, status = cached[1], 200
-            if status == 200 and current:
-                self.cache[url] = (self.clock() + self._ttl(url, result[2]), result)
-                self.cache.move_to_end(url)
-                if len(self.cache) > self.limit:
-                    self.cache.popitem(last=False)
+            if status == 200:
+                now, ttl = self.clock(), self._ttl(url, result[2]) if current else self.active_ttl
+                self._served(now, ttl)
+                if current:
+                    self.cache[url] = (now + ttl, result, now, ttl)
+                    self.cache.move_to_end(url)
+                    if len(self.cache) > self.limit:
+                        self.cache.popitem(last=False)
             elif status == 429 or (status == 403 and (
                     h.get("retry-after") is not None or h.get("x-ratelimit-remaining") == "0"
                     or (isinstance(body, dict) and "rate limit" in str(body.get("message", "")).lower()))):
@@ -157,6 +181,17 @@ class ReadCache:
                 self.retry_at = self.clock() + max(1, delay)
         flight.finish(result)
         return result
+
+
+class Observed:
+    """Oldest served read age (seconds) and the longest cache lifetime that applied to it."""
+
+    def __init__(self):
+        self.age, self.ttl = None, 0
+
+    def add(self, age, ttl):
+        self.age = max(age, self.age or 0)
+        self.ttl = max(ttl, self.ttl)
 
 
 class _Flight:

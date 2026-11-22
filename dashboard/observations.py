@@ -1,5 +1,9 @@
+import math
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
+from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 import httpx
@@ -16,6 +20,18 @@ API_VERSION = "2024-03-01"
 ENV_KEYS = frozenset({"RELEASE_ID", "GRACE_SECONDS", "LONG_TASK_SECONDS", "LONG_TASK_ABORT_ON_DRAIN"})
 JOB_PREFIX = {"kr": "korea", "sea": "southeastasia", "usw": "westus"}
 SOURCE_ERRORS = (AzureError, RemoteError, httpx.HTTPError, ValueError, TypeError, KeyError)
+
+
+def _iso(seconds):
+    return datetime.fromtimestamp(seconds, timezone.utc).isoformat()
+
+
+def _epoch(value):
+    try:
+        moment = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    return (moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)).timestamp()
 
 
 def candidate(target, run_id):
@@ -53,6 +69,38 @@ def job_states(jobs, kind, region=None):
             result[key] = ((rows[0].get("conclusion") or "unknown") if rows[0].get("status") == "completed"
                            else (rows[0].get("status") or "unknown"))
     return result
+
+
+def _single_job(jobs, region):
+    rows = [job for job in jobs if job.get("name", "").strip().lower() == f"{JOB_PREFIX[region]} / rollout"]
+    return rows[0] if len(rows) == 1 else None
+
+
+def job_progress(jobs, repo, run_id, now):
+    """Per-region current step (with start and elapsed seconds), failed step and job log link from release job steps."""
+    log = re.compile(rf"https://github\.com/{re.escape(repo)}/actions/runs/{positive(run_id)}/job/[0-9]+", re.IGNORECASE)
+    result = {}
+    for region in JOB_PREFIX:
+        job = _single_job(jobs, region) or {}
+        steps = [step for step in job.get("steps") or () if isinstance(step, dict)]
+        current = next((step for step in steps if step.get("status") == "in_progress"), None)
+        started = _epoch(current.get("started_at")) if current and job.get("status") == "in_progress" else None
+        failed = next((step.get("name") for step in steps if step.get("conclusion") in ("failure", "timed_out")), None)
+        url = job.get("html_url")
+        result[region] = {
+            "step": current.get("name") if started is not None else None,
+            "started_at": _iso(started) if started is not None else None,
+            "elapsed_seconds": int(max(0, now - started)) if started is not None else None,
+            "failed_step": failed if job.get("status") == "completed" and job.get("conclusion") != "success" else None,
+            "log_url": url if isinstance(url, str) and log.fullmatch(url) else None}
+    return result
+
+
+def traffic_stage(weight):
+    """Rollout stage (0/10/50/100) reached by the candidate's Azure traffic weight."""
+    if type(weight) is not int:
+        return None
+    return next(stage for stage in (100, 50, 10, 0) if weight >= stage)
 
 
 def previous_revision(traffic, desired):
@@ -165,10 +213,21 @@ class AzureReader:
             return None
 
 
+def source(now, observed, stale_after, reason=None):
+    """Freshness of one snapshot source; observed is epoch seconds or None when the source produced nothing."""
+    if observed is None:
+        return {"observed_at": None, "age_seconds": None, "state": "unavailable", "reason": reason or "upstream_error"}
+    age = max(0, now - observed)
+    return {"observed_at": _iso(observed), "age_seconds": int(age), "state": "stale" if age > stale_after else "fresh"}
+
+
 class DashboardReader:
-    def __init__(self, shared, targets, github, evidence, inbox, store, azure=None):
+    def __init__(self, shared, targets, github, evidence, inbox, store, azure=None, cache=None, clock=time.time,
+                 stale_after=15):
         self.shared, self.targets, self.github = shared, targets, github
         self.evidence, self.inbox, self.store, self.azure = evidence, inbox, store, azure
+        # cache: the display ReadCache (observation ages and rate-limit back-off); None for uncached readers.
+        self.cache, self.clock, self.stale_after = cache, clock, stale_after
 
     def _run_matches(self, run, run_id, workflow):
         path = f".github/workflows/{workflow}"
@@ -286,9 +345,42 @@ class DashboardReader:
     def snapshot(self, actor, run_id=None, region="kr"):
         if region not in REGIONS:
             raise InvalidAction("Unknown region")
+        now = self.clock()
+        with self.cache.track() if self.cache else nullcontext() as seen:
+            result = self._snapshot(actor, run_id, region, now)
+        sources = {"github": self._github_source(now, result["github_available"], seen),
+                   "audit": source(now, now if result.pop("_audit_read") else None, self.stale_after)}
+        for name in REGIONS:
+            observation = result["regions"][name]
+            sources[f"azure:{name}"] = source(
+                now, None if observation.get("unavailable") else _epoch(observation.get("observed_at")), self.stale_after)
+            for revision in observation.get("revisions") or ():
+                if "sample" in revision:
+                    sample = revision["sample"]
+                    sources[f"runtime:{revision['name']}"] = source(
+                        now, _epoch(sample.get("observed_at")) if sample else None, self.stale_after, "not_produced")
+        result["sources"] = sources
+        return result
+
+    def _github_source(self, now, available, seen):
+        backoff = self.cache.backoff_remaining() if self.cache else 0
+        if not available:
+            entry = source(now, None, 0, "rate_limited" if backoff else "upstream_error")
+        else:
+            age = seen.age if seen is not None and seen.age is not None else 0
+            # Reads are served from cache within their lifetime; only data older than that is stale.
+            entry = source(now, now - age, (seen.ttl if seen is not None else 0) + self.stale_after)
+            if backoff:
+                entry["reason"] = "rate_limited"
+        if backoff:
+            entry["retry_after_seconds"] = math.ceil(backoff)
+        return entry
+
+    def _snapshot(self, actor, run_id, region, now):
         gh_available, audit_available = True, True
-        run, baseline, current, states, audit = None, None, None, {}, []
+        run, baseline, current, states, audit, progress = None, None, None, {}, [], {}
         recent, pending, restored, retired, cancelled = [], [], None, None, False
+        active_runs, inbox = [], []
         try:
             recent = [row for row in self.github.runs(recent=True)
                       if self._run_matches(row, row.get("id"), "release.yml")]
@@ -299,10 +391,13 @@ class DashboardReader:
             elif recent:
                 run = next((row for row in recent if row.get("status") != "completed"), recent[0])
             if run:
-                states = job_states(self.github.jobs(run["id"], run["run_attempt"]), "deploy")
+                jobs = self.github.jobs(run["id"], run["run_attempt"])
+                states = job_states(jobs, "deploy")
+                progress = job_progress(jobs, self.shared.repo, run["id"], now)
                 # Evidence cannot change any action until the source run completes.
                 if run.get("run_attempt") == 1 and run.get("status") == "completed":
                     baseline = self.baseline(run, region)
+            active_runs = self.github.active_runs()
         except SOURCE_ERRORS:
             gh_available = False
 
@@ -310,13 +405,25 @@ class DashboardReader:
             tasks = {r: pool.submit(self._regional, r, run, region, baseline if r == region else None)
                      for r in REGIONS}
             regions = {r: {"job": states.get(r, "unknown"), **work.result()} for r, work in tasks.items()}
+        empty = dict.fromkeys(("step", "started_at", "elapsed_seconds", "failed_step", "log_url"))
+        for name, observation in regions.items():
+            observation["progress"] = progress.get(name, dict(empty))
+            observation["traffic_stage"] = traffic_stage(observation.get("candidate_weight"))
 
+        audit_read = False
         try:
             audit = self.store.recent()
             unresolved = self.store.unresolved()
             if run:
                 cancelled = self.store.claimed(f"cancel:{run['id']}")
                 current = self.store.by_run(run["id"])
+            audit_read = True
+        except SOURCE_ERRORS:
+            audit, current, cancelled = [], None, False
+        try:
+            if not audit_read:
+                raise ValueError("Audit store unavailable")
+            if run:
                 if current and current["kind"] == "deploy":
                     pending.extend(self._pending_view(actor, current, unresolved))
                 for op in audit:
@@ -337,14 +444,12 @@ class DashboardReader:
                                        and ev.get("source_run") == str(run["id"]) and regions[region].get("candidate_weight") == 100
                                        and any(r["name"] == baseline["stable"] and r["active"] is False
                                                for r in regions[region].get("revisions", [])))
+            inbox = self._inbox(actor, pending, active_runs, run, unresolved)
         except SOURCE_ERRORS:
             audit_available, unresolved = False, True
-            pending = []
+            pending, inbox = [], []
 
-        try:
-            active = self._active() if gh_available else True
-        except SOURCE_ERRORS:
-            active, gh_available = True, False
+        active = bool(active_runs) if gh_available else True
         reasons = {}
         for action in ("deploy", "cancel", "rollback", "retire"):
             if OPERATOR not in actor.roles:
@@ -370,9 +475,25 @@ class DashboardReader:
                   "environment", "region")
         return {"run": ({**self._view_run(run), "profile": current.get("profile") if current else None} if run else None),
                 "runs": [self._view_run(row) for row in recent[:20]], "regions": regions, "build": states.get("build", "unknown"),
-                "pending": pending, "actions": reasons, "audit": [{k: row[k] for k in public if k in row} for row in audit],
+                "pending": pending, "inbox": inbox, "actions": reasons, "audit": [{k: row[k] for k in public if k in row} for row in audit],
                 "restored": restored is True, "retired": retired is True, "observed_at": stamp(),
-                "github_available": gh_available, "audit_available": audit_available}
+                "github_available": gh_available, "audit_available": audit_available, "_audit_read": audit_read}
+
+    def _inbox(self, actor, pending, active_runs, selected, unresolved, limit=10):
+        """Waiting gates of every console-started run that is still active, plus the selected run's gates."""
+        gates = list(pending)
+        known = {(gate["run_id"], gate["environment"]) for gate in gates}
+        for item in active_runs[:limit]:
+            if not isinstance(item.get("id"), int) or (selected and item["id"] == selected["id"]):
+                continue
+            op = self.store.by_run(item["id"])
+            if not op or op.get("kind") not in WORKFLOW or op.get("run_id") != item["id"]:
+                continue
+            for gate in self._pending_view(actor, op, unresolved):
+                if (gate["run_id"], gate["environment"]) not in known:
+                    known.add((gate["run_id"], gate["environment"]))
+                    gates.append(gate)
+        return gates
 
     def _pending_view(self, actor, op, unresolved):
         if op.get("status") != "accepted":
@@ -386,5 +507,6 @@ class DashboardReader:
                       "ReleaseApprover role required" if APPROVER not in actor.roles else
                       "A different Entra approver is required" if actor.object_id == op["actor"] else None)
             result.append({"operation_id": op["operation_id"], "run_id": op["run_id"], "kind": op["kind"],
-                           "region": region, "environment": env, "reason": reason})
+                           "region": region, "environment": env, "reason": reason,
+                           "source_run_id": op.get("source_run_id")})
         return result

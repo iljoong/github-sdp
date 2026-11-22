@@ -108,8 +108,10 @@ class OperationsTests(unittest.TestCase):
         reads()
         ops.request(self.operator, Command("cancel", self.key, source_run_id=234))
         reads()
-        self.assertEqual(calls[4:], ["/runs/234", "/workflows/release.yml/runs?branch=main&event=workflow_dispatch&per_page=100&page=1",
-                                     "/runs?branch=main&event=workflow_dispatch&per_page=100&page=1"])
+        active = [f"/runs?branch=main&event=workflow_dispatch&status={status}&per_page=100&page=1"
+                  for status in ("in_progress", "queued", "waiting", "requested", "pending")]
+        self.assertEqual(calls[8:], ["/runs/234", "/workflows/release.yml/runs?branch=main&event=workflow_dispatch&per_page=100&page=1",
+                                     *active])
         del calls[:]
         ops.request(self.operator, Command("deploy", str(uuid4()), profile="demo"))
         ops.review(self.approver, self.store.by_run(234)["operation_id"], "prod-kr", True)

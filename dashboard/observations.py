@@ -387,7 +387,7 @@ class DashboardReader:
         gh_available, audit_available = True, True
         run, baseline, current, states, audit, progress = None, None, None, {}, [], {}
         recent, pending, restored, retired, cancelled = [], [], None, None, False
-        active_runs, inbox, jobs = [], [], []
+        active_runs, inbox, jobs, inbox_truncated = [], [], [], False
         try:
             recent = [row for row in self.github.runs(recent=True)
                       if self._run_matches(row, row.get("id"), "release.yml")]
@@ -452,10 +452,10 @@ class DashboardReader:
                                        and ev.get("source_run") == str(run["id"]) and regions[region].get("candidate_weight") == 100
                                        and any(r["name"] == baseline["stable"] and r["active"] is False
                                                for r in regions[region].get("revisions", [])))
-            inbox = self._inbox(actor, pending, active_runs, run, unresolved)
+            inbox, inbox_truncated = self._inbox(actor, pending, active_runs, run, unresolved)
         except SOURCE_ERRORS:
             audit_available, unresolved = False, True
-            pending, inbox = [], []
+            pending, inbox, inbox_truncated = [], [], False
 
         active = bool(active_runs) if gh_available else True
 
@@ -468,24 +468,20 @@ class DashboardReader:
                 return "A protected workflow is still active"
             return None
 
-        reasons = {}
-        for action in ("deploy", "cancel", "rollback", "retire"):
-            reason = blocked(action)
-            if reason:
-                pass
-            elif action == "cancel":
-                reason = ("A cancellation was already accepted" if cancelled else
-                          None if run and run.get("status") != "completed" else "No active release selected")
-            elif action == "deploy":
-                reason = None
-            elif not run:
-                reason = "Select an original completed release"
-            else:
-                try:
-                    reason = self.recovery(action, run, baseline, {**regions[region], "region": region})
-                except SOURCE_ERRORS:
-                    reason = "Recovery evidence is unavailable"
-            reasons[action] = reason
+        def eligible(action):
+            if action == "deploy":
+                return None
+            if action == "cancel":
+                return ("A cancellation was already accepted" if cancelled else
+                        None if run and run.get("status") != "completed" else "No active release selected")
+            if not run:
+                return "Select an original completed release"
+            try:
+                return self.recovery(action, run, baseline, {**regions[region], "region": region})
+            except SOURCE_ERRORS:
+                return "Recovery evidence is unavailable"
+
+        reasons = {action: blocked(action) or eligible(action) for action in ("deploy", "cancel", "rollback", "retire")}
         public = ("operation_id", "kind", "status", "created_at", "actor", "actor_name", "source_run_id", "run_id",
                   "environment", "region")
         ops = [*audit, *([current] if current else [])]
@@ -493,7 +489,7 @@ class DashboardReader:
                 "runs": [self._view_run(row) for row in recent[:20]], "regions": regions, "build": states.get("build", "unknown"),
                 "history": self._history(recent[:20], run, ops, reasons, blocked, now),
                 "timeline": self._timeline(run, jobs, ops) if run else [],
-                "pending": pending, "inbox": inbox, "actions": reasons, "audit": [{k: row[k] for k in public if k in row} for row in audit],
+                "pending": pending, "inbox": inbox, "inbox_truncated": inbox_truncated, "actions": reasons, "audit": [{k: row[k] for k in public if k in row} for row in audit],
                 "restored": restored is True, "retired": retired is True, "observed_at": stamp(),
                 "github_available": gh_available, "audit_available": audit_available, "_audit_read": audit_read}
 
@@ -561,20 +557,25 @@ class DashboardReader:
         return [event for _, event in events[-limit:]]
 
     def _inbox(self, actor, pending, active_runs, selected, unresolved, limit=10):
-        """Waiting gates of every console-started run that is still active, plus the selected run's gates."""
+        """Waiting gates of the selected run plus those of up to `limit` other active console-started runs.
+
+        Returns (gates, truncated); `truncated` is set when more active console runs exist than are listed.
+        """
         gates = list(pending)
         known = {(gate["run_id"], gate["environment"]) for gate in gates}
-        for item in active_runs[:limit]:
+        started = []
+        for item in active_runs:
             if not isinstance(item.get("id"), int) or (selected and item["id"] == selected["id"]):
                 continue
             op = self.store.by_run(item["id"])
-            if not op or op.get("kind") not in WORKFLOW or op.get("run_id") != item["id"]:
-                continue
+            if op and op.get("kind") in WORKFLOW and op.get("run_id") == item["id"]:
+                started.append(op)
+        for op in started[:limit]:
             for gate in self._pending_view(actor, op, unresolved):
                 if (gate["run_id"], gate["environment"]) not in known:
                     known.add((gate["run_id"], gate["environment"]))
                     gates.append(gate)
-        return gates
+        return gates, len(started) > limit
 
     def _pending_view(self, actor, op, unresolved):
         if op.get("status") != "accepted":

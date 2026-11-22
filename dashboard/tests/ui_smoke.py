@@ -3,7 +3,8 @@
 Usage (system Python with Playwright; the fixture server runs under the dashboard venv):
   python dashboard/tests/ui_smoke.py --server-python <dashboard venv python> [--headed]
 Covers: approval inbox across regions + tab-title badge + notifications, health/step/traffic-stage badges,
-per-source freshness, stream update, polling fallback, Live/Pause/refresh, deep link + back button,
+per-source freshness, stream update, active-release polling with the stream open, idle slow poll, inbox
+truncation note, polling fallback, Live/Pause/refresh, deep link + back button,
 incremental render preserving open sections, scroll and the release picker, resource tree, events timeline,
 release history with per-entry actions, typed-region confirmation, keyboard shortcuts, dark theme, mobile width.
 The fixture server logs one ConnectionAbortedError traceback when the smoke deliberately breaks the stream.
@@ -99,7 +100,7 @@ def snapshot(**changes):
                      event(200, "approval_requested", environment="prod-kr", region="kr"),
                      event(100, "approve", status="accepted", environment="prod-kr", region="kr", actor="u2",
                            actor_name="Lee Approver")],
-        "pending": [],
+        "pending": [], "inbox_truncated": True,
         "inbox": [gate("op-usw", 501, "usw"),
                   gate("op-kr-rb", 610, "kr", "A different Entra approver is required", kind="rollback")],
         "actions": {"deploy": "A protected workflow is still active", "cancel": None,
@@ -182,7 +183,8 @@ def run(fixture, headed, screenshot=None):
             expect(mine.get_by_role("button", name="승인", exact=True)).to_be_disabled()
             expect(items.filter(has_text="prod-usw").get_by_role("button", name="승인", exact=True)).to_be_enabled()
             expect(page).to_have_title("(1) 배포 관제실")
-            check("inbox across regions, requester explanation, title badge")
+            expect(page.locator("#inbox-truncated")).to_be_visible()
+            check("inbox across regions, requester explanation, title badge, truncation note")
 
             for key, health in (("kr", "healthy"), ("sea", "progressing"), ("usw", "waiting")):
                 badge = page.locator(f"[data-region={key}] .badge")
@@ -259,6 +261,27 @@ def run(fixture, headed, screenshot=None):
             assert page.evaluate("window.scrollY") == scroll, "scroll reset"
             page.wait_for_function("window.__notes.length === 1")
             check("stream update, incremental render, notification for new approval")
+
+            update["regions"]["sea"]["progress"] = progress("Bake at 50% - verify", 70)
+            fx.call("PUT", "/__fixture/snapshot", update)
+            expect(page.locator("[data-region=sea] .step")).to_contain_text("verify", timeout=7000)
+            expect(page.locator("#connection")).to_have_attribute("data-mode", "stream")
+            check("active release keeps the 5 s poll while the stream is open")
+
+            idle = snapshot(run={**update["run"], "status": "completed", "conclusion": "success"}, inbox=[],
+                            inbox_truncated=False, regions={k: region("success", 100) for k in ("kr", "sea", "usw")})
+            fx.call("PUT", "/__fixture/snapshot", idle)
+            fx.call("POST", "/__fixture/change", {"run_id": 501})
+            expect(page.locator("#inbox-empty")).to_be_visible(timeout=4000)
+            expect(page.locator("#inbox-truncated")).to_be_hidden()
+            page.wait_for_timeout(500)
+            count = len(fx.call("GET", "/__fixture/requests"))
+            page.wait_for_timeout(7000)
+            assert len(fx.call("GET", "/__fixture/requests")) == count, "idle console with an open stream kept fast polling"
+            fx.call("PUT", "/__fixture/snapshot", update)
+            fx.call("POST", "/__fixture/change", {"run_id": 501})
+            expect(items).to_have_count(3, timeout=4000)
+            check("idle console with an open stream relies on the stream and a slow safety poll")
 
             fx.call("POST", "/__fixture/stream", {"enabled": False})
             expect(page.locator("#connection")).to_have_attribute("data-mode", "polling", timeout=15000)

@@ -8,6 +8,14 @@ from uuid import UUID
 REGIONS = ("kr", "sea", "usw")
 ENVIRONMENTS = frozenset(f"prod-{kind}{r}" for r in REGIONS for kind in ("", "rollback-"))
 REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+")
+# Observed workflow files and their `name:`; workflow_job payloads carry only the display name, so job
+# hints are allowlisted by name (a renamed workflow just stops producing job hints until updated here).
+OBSERVED_WORKFLOWS = {
+    "release.yml": "Safe ACA release - Korea then Southeast Asia then West US",
+    "restore.yml": "Protected restore from original release baseline",
+    "demo-retire.yml": "Demo - retire previous revision (one region)",
+    "release-kr.yml": "Quick release - build then Korea only",
+}
 RESOURCE = re.compile(r"/subscriptions/[A-Fa-f0-9-]{36}/resourceGroups/[A-Za-z0-9_.()-]+/providers/Microsoft\.App/containerApps/[a-z0-9-]+", re.I)
 
 

@@ -113,6 +113,27 @@ class GitHubTests(unittest.TestCase):
         read_both()
         self.assertEqual(len(calls), 12)
 
+    def test_runs_listed_as_completed_keep_their_job_and_gate_reads_for_the_completed_ttl(self):
+        now, calls = [0], []
+
+        def transport(method, url, headers, body):
+            calls.append(url.split("/actions")[1])
+            if "runs?" in url:
+                return 200, {}, {"workflow_runs": [{"id": 3, "status": "completed"}, {"id": 4, "status": "in_progress"}]}
+            return 200, {}, {"jobs": []} if "/jobs" in url else []
+
+        observer = GitHub("owner/repo", lambda: "token", ReadCache(transport, clock=lambda: now[0]))
+        observer.runs(recent=True)
+        for run_id in (3, 4):
+            observer.jobs(run_id, 1)
+            observer.pending(run_id)
+        del calls[:]
+        now[0] = 120
+        for run_id in (3, 4):
+            observer.jobs(run_id, 1)
+            observer.pending(run_id)
+        self.assertEqual(calls, ["/runs/4/attempts/1/jobs?per_page=100&page=1", "/runs/4/pending_deployments"])
+
     def test_concurrent_identical_reads_share_one_upstream_call(self):
         calls, entered, release = [], threading.Event(), threading.Event()
 

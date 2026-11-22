@@ -47,8 +47,9 @@ const eventText = {job_started: "시작", approval_requested: "승인 요청"};
 const regionKeys = {Digit1: "kr", Digit2: "sea", Digit3: "usw", Numpad1: "kr", Numpad2: "sea", Numpad3: "usw"};
 const healthBadges = {healthy: "✓ 정상", progressing: "⟳ 진행 중", degraded: "✕ 저하", waiting: "⏸ 대기", unknown: "? 미확인"};
 const sourceReasons = {rate_limited: "GitHub 호출 제한", upstream_error: "조회 실패", not_produced: "응답 없음"};
-// Polling intervals (ms): a safety net while the change stream is connected, fast while a release or
-// approval is in flight, slow when idle; errors back off exponentially up to the maximum.
+// Polling intervals (ms): fast while a release or approval is in flight, even with the change stream open
+// (step, elapsed time and traffic stage change without webhook events); when idle, a slow safety net behind
+// the stream or a slower poll without it. Errors back off exponentially up to the maximum.
 const POLL = {stream: 60000, active: 5000, idle: 30000, retryStream: 60000, backoffMax: 120000};
 const STALE_SECONDS = 60;
 const baseTitle = document.title;
@@ -352,6 +353,7 @@ function renderInbox() {
   keyed($("inbox-list"), items.map(gate => [gateKey(gate), gate]), inboxEntry);
   enableCommands();
   $("inbox-empty").hidden = items.length > 0;
+  $("inbox-truncated").hidden = !data?.inbox_truncated;
   const mine = items.filter(gate => !gate.reason);
   $("inbox-title").textContent = items.length ? `승인 대기 ${items.length}건 · 내가 승인 가능 ${mine.length}건` : "승인 대기";
   document.title = mine.length ? `(${mine.length}) ${baseTitle}` : baseTitle;
@@ -494,7 +496,7 @@ function schedule() {
   nextPollAt = 0;
   if (live && !document.hidden) {
     let delay = errors ? Math.min(POLL.backoffMax, POLL.active * 2 ** (errors - 1))
-      : streamOpen ? POLL.stream : active() ? POLL.active : POLL.idle;
+      : active() ? POLL.active : streamOpen ? POLL.stream : POLL.idle;
     const retry = data?.sources?.github?.retry_after_seconds;
     if (retry) delay = Math.max(delay, retry * 1000);
     nextPollAt = Date.now() + delay;

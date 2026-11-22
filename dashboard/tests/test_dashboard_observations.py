@@ -7,11 +7,12 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from dashboard.config import Target
-from dashboard.github import GitHub, ReadCache
+from dashboard.github import GitHub, ReadCache, RemoteError
 from dashboard.memo import AzureMemo, SharedMemo
 from dashboard.evidence import Evidence, UnsafeArtifact, read_member
 from dashboard.observations import (DashboardReader, candidate, job_states, previous_revision, runtime_sample,
                                     safe_env)
+from dashboard.operations import InvalidAction
 
 
 def archive(entries):
@@ -360,6 +361,32 @@ class ApprovalInboxTests(unittest.TestCase):
                          "A different Entra approver is required")
 
 
+    @staticmethod
+    def waiting_console_run(console, run_id):
+        console.runs[run_id] = release_run(run_id, "waiting")
+        console.jobs[run_id] = [{"name": "southeastasia / rollout", "status": "waiting"}]
+        console.rules[run_id] = [{"environment": "prod-sea", "sha": SHA}]
+        console.ops.append({"operation_id": f"o{run_id}", "kind": "deploy", "status": "accepted", "run_id": run_id,
+                            "actor": "requester", "created_at": iso(T0)})
+
+    def test_runs_not_started_from_the_console_do_not_crowd_out_console_gates(self):
+        console = Console("completed")
+        for run_id in range(100, 110):
+            console.runs[run_id] = release_run(run_id, "in_progress")
+        self.waiting_console_run(console, 9)
+        snapshot = console.snapshot(run_id=7)
+        self.assertEqual([gate["run_id"] for gate in snapshot["inbox"]], [9])
+        self.assertFalse(snapshot["inbox_truncated"])
+
+    def test_inbox_reports_when_more_console_runs_are_active_than_it_lists(self):
+        console = Console("completed")
+        for run_id in range(20, 31):
+            self.waiting_console_run(console, run_id)
+        snapshot = console.snapshot(run_id=7)
+        self.assertEqual(len(snapshot["inbox"]), 10)
+        self.assertTrue(snapshot["inbox_truncated"])
+
+
 class RegionProgressTests(unittest.TestCase):
     def test_regions_report_current_step_elapsed_failed_step_log_and_traffic_stage(self):
         console = Console()
@@ -484,33 +511,58 @@ class EventTimelineTests(unittest.TestCase):
 
 
 class ActiveWorkflowTests(unittest.TestCase):
-    def test_one_repository_query_blocks_only_on_allowlisted_active_runs(self):
+    """Write-time active-workflow check over a fake GitHub that honours `status=` and pagination."""
+
+    def setUp(self):
         from uuid import uuid4
 
-        from dashboard.github import GitHub
-        from dashboard.operations import Command, InvalidAction
+        from dashboard.operations import Command
 
-        runs, calls = [], []
+        self.runs, self.calls, self.failing = [], [], None
 
         def send(method, url, headers, body):
-            calls.append(url)
-            return 200, {}, {"workflow_runs": runs}
+            self.calls.append(url)
+            query = dict(part.split("=", 1) for part in url.split("?", 1)[1].split("&"))
+            if query.get("status") == self.failing:
+                return 502, {}, None
+            matching = [run for run in self.runs if run["status"] == query.get("status")]
+            page, size = int(query["page"]), int(query["per_page"])
+            return 200, {}, {"workflow_runs": matching[(page - 1) * size:page * size]}
 
-        reader = DashboardReader(SimpleNamespace(repo_id=12), {}, GitHub("owner/repo", lambda: "t", send),
-                                 None, None, None)
-        deploy = Command("deploy", str(uuid4()), profile="demo")
-        runs.extend([{"path": ".github/workflows/ci.yml", "status": "in_progress"},
-                     {"path": ".github/workflows/release.yml", "status": "completed"}])
-        reader.check(deploy)
-        self.assertEqual(len(calls), 1)
+        self.reader = DashboardReader(SimpleNamespace(repo_id=12), {}, GitHub("owner/repo", lambda: "t", send),
+                                      None, None, None)
+        self.deploy = Command("deploy", str(uuid4()), profile="demo")
+
+    def add(self, count, path, status):
+        self.runs.extend({"id": len(self.runs) + 1, "path": path, "status": status} for _ in range(count))
+
+    def test_unfinished_allowlisted_runs_block_and_others_do_not(self):
+        self.add(1, ".github/workflows/ci.yml", "in_progress")
+        self.add(1, ".github/workflows/release.yml", "completed")
+        self.reader.check(self.deploy)
         for path, status in ((".github/workflows/restore.yml@main", "waiting"),
-                             (".github/workflows/release-kr.yml", "queued")):
-            runs.append({"path": path, "status": status})
-            with self.subTest(path=path), self.assertRaises(InvalidAction):
-                reader.check(deploy)
-            runs.pop()
-        self.assertEqual(len(calls), 3)
-        self.assertTrue(calls[0].startswith("https://api.github.com/repos/owner/repo/actions/runs?"))
+                             (".github/workflows/release-kr.yml", "queued"),
+                             (".github/workflows/demo-retire.yml", "requested"),
+                             (".github/workflows/release.yml", "pending")):
+            self.runs.append({"id": 99, "path": path, "status": status})
+            with self.subTest(path=path, status=status), self.assertRaises(InvalidAction):
+                self.reader.check(self.deploy)
+            self.runs.pop()
+        self.assertTrue(all(url.startswith("https://api.github.com/repos/owner/repo/actions/runs?branch=main&"
+                                           "event=workflow_dispatch&status=") for url in self.calls))
+        self.assertNotIn("status=completed", " ".join(self.calls))
+
+    def test_an_older_protected_run_beyond_the_first_page_still_blocks(self):
+        self.add(100, ".github/workflows/ci.yml", "in_progress")
+        self.add(1, ".github/workflows/release.yml", "in_progress")
+        with self.assertRaises(InvalidAction):
+            self.reader.check(self.deploy)
+        self.assertEqual(sum("status=in_progress" in url for url in self.calls), 2)
+
+    def test_any_failed_status_query_fails_the_write_check_closed(self):
+        self.failing = "waiting"
+        with self.assertRaises(RemoteError):
+            self.reader.check(self.deploy)
 
 
 class AzureTransportTests(unittest.TestCase):

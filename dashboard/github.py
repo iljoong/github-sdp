@@ -8,11 +8,11 @@ from collections import OrderedDict
 from contextlib import contextmanager
 from datetime import datetime
 
-from .config import ENVIRONMENTS, REGIONS, positive, repository
+from .config import ENVIRONMENTS, OBSERVED_WORKFLOWS, REGIONS, positive, repository
 
 API = "https://api.github.com"
 WORKFLOWS = frozenset({"release.yml", "restore.yml", "demo-retire.yml"})
-OBSERVED_WORKFLOWS = WORKFLOWS | {"release-kr.yml"}
+UNFINISHED = ("in_progress", "queued", "waiting", "requested", "pending")
 RUN_PATH = re.compile(r"/actions/runs/(\d+)(/[^?]*)?(?:\?|$)")
 RUN_LIST = re.compile(r"/actions/(?:workflows/[^/?]+/)?runs(?:\?|$)")
 
@@ -94,6 +94,10 @@ class ReadCache:
     def _ttl(self, url, body):
         match = RUN_PATH.search(url)
         if not match:
+            if RUN_LIST.search(url) and isinstance(body, dict) and isinstance(body.get("workflow_runs"), list):
+                for run in body["workflow_runs"]:
+                    if isinstance(run, dict) and isinstance(run.get("id"), int) and isinstance(run.get("status"), str):
+                        self._remember(run["id"], run["status"])
             return self.active_ttl
         run_id = int(match.group(1))
         if not match.group(2) and isinstance(body, dict) and isinstance(body.get("status"), str):
@@ -283,7 +287,8 @@ class GitHub:
     def run(self, run_id):
         return self._call("GET", f"/runs/{positive(run_id)}")[1]
 
-    def _pages(self, path, key, initial="?", pages=5):
+    def _pages(self, path, key, initial="?", pages=5, complete=False):
+        """Up to `pages` pages of 100; with `complete`, a listing that does not end within them is an error."""
         rows = []
         for page in range(1, pages + 1):
             _, data = self._call("GET", f"{path}{initial}per_page=100&page={page}")
@@ -296,6 +301,8 @@ class GitHub:
             rows.extend(batch)
             if len(batch) < 100:
                 return rows
+        if complete:
+            raise RemoteError()
         return rows
 
     def runs(self, workflow="release.yml", recent=False):
@@ -305,10 +312,20 @@ class GitHub:
                            "&", pages=1 if recent else 5)
 
     def active_runs(self):
-        """One repository-wide query for unfinished main dispatch runs of the observed workflows."""
+        """Unfinished main dispatch runs of the observed workflows, repository-wide.
+
+        GitHub's `status` filter takes one value, so each unfinished status is listed and paged to the end;
+        any failed or unterminated listing raises so write-time checks fail closed.
+        """
         paths = {f".github/workflows/{name}" for name in OBSERVED_WORKFLOWS}
-        return [run for run in self._pages("/runs?branch=main&event=workflow_dispatch", "workflow_runs", "&", pages=1)
-                if run.get("status") != "completed" and str(run.get("path", "")).split("@", 1)[0] in paths]
+        found = {}
+        for status in UNFINISHED:
+            for run in self._pages(f"/runs?branch=main&event=workflow_dispatch&status={status}", "workflow_runs",
+                                   "&", pages=10, complete=True):
+                if (run.get("status") != "completed" and str(run.get("path", "")).split("@", 1)[0] in paths
+                        and run.get("id") not in found):
+                    found[run.get("id")] = run
+        return list(found.values())
 
     def jobs(self, run_id, attempt):
         return self._pages(f"/runs/{positive(run_id)}/attempts/{positive(attempt)}/jobs", "jobs")

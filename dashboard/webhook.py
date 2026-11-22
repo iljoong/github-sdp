@@ -10,20 +10,12 @@ from uuid import UUID
 from fastapi import FastAPI, HTTPException, Request, Response
 from starlette.concurrency import run_in_threadpool
 
-from .config import ENVIRONMENTS, SharedSettings, positive, repository
-from .github import OBSERVED_WORKFLOWS
+from .config import ENVIRONMENTS, OBSERVED_WORKFLOWS, SharedSettings, positive, repository
 from .store import Inbox, table_clients
 
 MAX_BODY = 1_048_576
-OBSERVED_PATHS = frozenset(f".github/workflows/{name}" for name in OBSERVED_WORKFLOWS)
-# workflow_job payloads carry only the workflow's display name, so job hints are allowlisted by the
-# `name:` of each observed workflow file (a renamed workflow just stops producing job hints).
-OBSERVED_NAMES = frozenset({
-    "Safe ACA release - Korea then Southeast Asia then West US",
-    "Protected restore from original release baseline",
-    "Demo - retire previous revision (one region)",
-    "Quick release - build then Korea only",
-})
+OBSERVED_PATHS = frozenset(f".github/workflows/{path}" for path in OBSERVED_WORKFLOWS)
+OBSERVED_NAMES = frozenset(OBSERVED_WORKFLOWS.values())
 CHANGE_EVENTS = frozenset({"workflow_run", "workflow_job"})
 
 

@@ -11,7 +11,7 @@
 | ACR 이미지 게시 | 게시자만 일반 RBAC 레지스트리에 `AcrPush`, ABAC 레지스트리에 저장소 조건부 `Container Registry Repository Writer`. `az acr build`를 쓰면 레지스트리의 Quick Build 실행·상태 조회 권한(`Container Registry Tasks Contributor` 또는 동등 권한)도 확인한다. 런타임에는 게시 권한을 주지 않는다. | 일회성 게시 권한 회수 |
 | Key Vault 초기화 | RBAC 기반 Vault의 비밀 작성자에 `Key Vault Secrets Officer`, RSA PEM 가져오기 담당자에 `Key Vault Crypto Officer` 또는 `keys/import/action` 및 필요한 조회 권한. 신규 객체 생성에 Vault 범위가 필요하면 임시로 사용한다. **이 구성의 RSA key import에 `Certificates Officer`는 필요하지 않다.** | 서명·비밀 해석 검증 후 임시 가져오기 권한 회수 |
 | Entra 등록과 할당 | 테넌트 앱 등록 정책에 따른 권한과 앱 소유권. Enterprise Application의 할당 필수·앱 역할 할당은 해당 앱을 관리할 수 있는 소유자/관리자가, 관리자 동의가 필요한 경우에는 적격 Entra 관리자가 처리한다. Single-tenant 웹 앱에 Console의 `/.auth/login/aad/callback`, ID token 발급, `ReleaseOperator`/`ReleaseApprover`를 구성한다. | 관리자 역할을 사용자나 앱 런타임에 상시 부여하지 않는다. |
-| GitHub 설정 | App 소유자 및 저장소 관리자: 대상 저장소에만 App 설치, `Actions: read/write`, `Deployments: read/write`, `Deployment protection rule` 이벤트 구독, Receiver URL과 서명 비밀 등록, 환경별 App 규칙 및 브랜치 제한 확인. | 운영 사용자에게 App 소유권이나 저장소 관리자 권한을 일괄 부여하지 않는다. |
+| GitHub 설정 | App 소유자 및 저장소 관리자: 대상 저장소에만 App 설치, `Actions: read/write`, `Deployments: read/write`, `Deployment protection rule`, `Workflow run`(`workflow_run`), `Workflow job`(`workflow_job`) 이벤트 구독, Receiver URL과 서명 비밀 등록, 환경별 App 규칙 및 브랜치 제한 확인. | 운영 사용자에게 App 소유권이나 저장소 관리자 권한을 일괄 부여하지 않는다. |
 
 ## 2. 상시 런타임 권한
 

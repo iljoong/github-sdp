@@ -1,5 +1,6 @@
 import base64
 import json
+import threading
 import time
 import unittest
 from types import SimpleNamespace
@@ -80,6 +81,137 @@ class GitHubTests(unittest.TestCase):
         now[0] = 45
         self.assertEqual(dashboard.run(123)["status"], "waiting")
         self.assertEqual(seen, [None, None, '"sample"'])
+
+    def test_active_run_reads_refresh_after_short_ttl_and_completed_runs_do_not(self):
+        now = [0]
+        calls = []
+        status = {1: "in_progress", 2: "completed"}
+
+        def transport(method, url, headers, body):
+            calls.append(url.split("/actions")[1])
+            run_id = int(url.split("/runs/")[1].split("/")[0])
+            if "/jobs" in url:
+                return 200, {}, {"jobs": [{"name": "build / build", "status": status[run_id]}]}
+            return 200, {}, {"id": run_id, "status": status[run_id]}
+
+        observer = GitHub("owner/repo", lambda: "token", ReadCache(transport, clock=lambda: now[0]))
+
+        def read_both():
+            for run_id in (1, 2):
+                observer.run(run_id)
+                observer.jobs(run_id, 1)
+
+        read_both()
+        self.assertEqual(len(calls), 4)
+        now[0] = 6
+        read_both()
+        self.assertEqual(sorted(calls[4:]), ["/runs/1", "/runs/1/attempts/1/jobs?per_page=100&page=1"])
+        now[0] = 120
+        read_both()
+        self.assertEqual(len(calls), 8)
+        now[0] = 400
+        read_both()
+        self.assertEqual(len(calls), 12)
+
+    def test_concurrent_identical_reads_share_one_upstream_call(self):
+        calls, entered, release = [], threading.Event(), threading.Event()
+
+        def transport(method, url, headers, body):
+            calls.append(url)
+            entered.set()
+            release.wait(5)
+            # Not cacheable, so late callers would make their own call unless they joined the flight.
+            return 502, {}, None
+
+        observer = GitHub("owner/repo", lambda: "token", ReadCache(transport))
+        outcomes = []
+
+        def read():
+            try:
+                observer.run(1)
+            except RemoteError as error:
+                outcomes.append(error.status)
+
+        readers = [threading.Thread(target=read) for _ in range(4)]
+        readers[0].start()
+        self.assertTrue(entered.wait(5))
+        for thread in readers[1:]:
+            thread.start()
+        time.sleep(0.2)
+        release.set()
+        for thread in readers:
+            thread.join(5)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(outcomes, [502] * 4)
+
+    def test_rate_limit_backoff_is_shared_and_reports_remaining_seconds(self):
+        now, calls = [100], []
+
+        def transport(method, url, headers, body):
+            calls.append(url)
+            if len(calls) == 1:
+                return 429, {"retry-after": "30"}, None
+            return 200, {}, {"status": "completed"}
+
+        cache = ReadCache(transport, clock=lambda: now[0])
+        observer = GitHub("owner/repo", lambda: "token", cache)
+        self.assertEqual(cache.backoff_remaining(), 0)
+        with self.assertRaises(RemoteError):
+            observer.run(1)
+        now[0] = 110
+        self.assertEqual(cache.backoff_remaining(), 20)
+        with self.assertRaises(RemoteError) as raised:
+            observer.run(2)
+        self.assertEqual((raised.exception.status, len(calls)), (429, 1))
+        now[0] = 131
+        self.assertEqual(cache.backoff_remaining(), 0)
+        self.assertEqual(observer.run(2)["status"], "completed")
+
+    def test_transport_reuses_one_strict_client(self):
+        import httpx
+        from unittest import mock
+
+        import dashboard.github as github_module
+
+        created = []
+        real = httpx.Client
+
+        def client(**settings):
+            created.append(settings)
+            return real(transport=httpx.MockTransport(lambda request: httpx.Response(
+                302, headers={"location": "https://unrelated.test"}, json={})), **settings)
+
+        github_module.close_transport()
+        with mock.patch.object(httpx, "Client", client):
+            try:
+                for _ in range(2):
+                    self.assertEqual(github_module.transport("GET", "https://api.github.com/x", {}, None)[0], 302)
+            finally:
+                github_module.close_transport()
+        self.assertEqual(len(created), 1)
+        self.assertEqual((created[0]["follow_redirects"], created[0]["trust_env"]), (False, False))
+
+    def test_slow_read_does_not_block_a_different_url(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def transport(method, url, headers, body):
+            if url.endswith("/runs/1"):
+                entered.set()
+                release.wait(5)
+            return 200, {}, {"status": "completed"}
+
+        observer = GitHub("owner/repo", lambda: "token", ReadCache(transport))
+        slow = threading.Thread(target=observer.run, args=(1,))
+        slow.start()
+        try:
+            self.assertTrue(entered.wait(5))
+            fast = threading.Thread(target=observer.run, args=(2,))
+            fast.start()
+            fast.join(2)
+            self.assertFalse(fast.is_alive())
+        finally:
+            release.set()
+            slow.join(5)
 
     def test_dispatch_correlates_only_with_returned_id_and_fixes_ref(self):
         calls = []

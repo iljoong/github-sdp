@@ -41,28 +41,38 @@ class Inbox:
             "PartitionKey eq @p and RowKey ge @low and RowKey lt @high",
             parameters={"p": self.partition, "low": f"{run_id}:", "high": f"{run_id};"}))
 
-    # Change hints live beside protection-rule rows under their own prefixes: `chgid:<delivery>` makes a
-    # delivery insert-once, and `chg:<UTC time>:<delivery>` orders hints by arrival for the change cursor.
+    # Change hints live beside protection-rule rows under their own prefixes: `chg:<UTC time>:<delivery>` orders
+    # hints by arrival for the change cursor, and `chgid:<delivery>` records that a delivery was handled.
+    # The receiver may only insert (entities/add), so the two rows are not written as one batch: the hint is
+    # written first and the marker last, so a failure in between is retried by GitHub's redelivery. A
+    # redelivery of an already handled event may add a duplicate hint, which only causes one extra refresh.
     def put_change(self, change):
+        received = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        try:
+            self.table.create_entity({
+                "PartitionKey": self.partition, "RowKey": f"chg:{received}:{change.delivery_id}",
+                "delivery_id": change.delivery_id, "run_id": str(change.run_id), "run_attempt": change.run_attempt,
+                "kind": change.kind, "action": change.action, "received_at": received})
+        except ResourceExistsError:
+            pass
         try:
             self.table.create_entity({"PartitionKey": self.partition, "RowKey": f"chgid:{change.delivery_id}"})
         except ResourceExistsError:
             return False
-        received = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-        self.table.create_entity({
-            "PartitionKey": self.partition, "RowKey": f"chg:{received}:{change.delivery_id}",
-            "delivery_id": change.delivery_id, "run_id": str(change.run_id), "run_attempt": change.run_attempt,
-            "kind": change.kind, "action": change.action, "received_at": received})
         return True
 
     def changes(self, after="chg:", limit=200):
-        """Change hints whose row key sorts after `after` (a `chg:` row key or `chg:<UTC time>`), oldest first."""
+        """Change hints whose row key sorts after `after` (a `chg:` row key or `chg:<UTC time>`), oldest first,
+        one per delivery."""
         rows = self.table.query_entities(
             "PartitionKey eq @p and RowKey gt @low and RowKey lt @high",
             parameters={"p": self.partition, "low": after, "high": "chg;"},
             select=["RowKey", "delivery_id", "run_id", "run_attempt", "kind", "action", "received_at"])
-        result = []
+        result, deliveries = [], set()
         for row in rows:
+            if row.get("delivery_id") in deliveries:
+                continue
+            deliveries.add(row.get("delivery_id"))
             result.append({**row, "run_id": int(row["run_id"])})
             if len(result) >= limit:
                 break

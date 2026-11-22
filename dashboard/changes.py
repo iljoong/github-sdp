@@ -18,13 +18,13 @@ class ChangeFeed:
     `overlap` window so hints stamped by a receiver with a slightly different clock are not missed.
     """
 
-    def __init__(self, inbox, invalidate, clock=time.time, interval=2.0, overlap=30.0, history=256):
+    def __init__(self, inbox, invalidate, clock=time.time, interval=2.0, overlap=30.0, history=256, page=200):
         self.inbox, self.invalidate, self.clock = inbox, invalidate, clock
-        self.interval, self.overlap = interval, overlap
+        self.interval, self.overlap, self.page = interval, overlap, page
         self.lock = threading.Lock()
         self.checked_at = float("-inf")
         self.sequence, self.events, self.seen = 0, deque(maxlen=history), set()
-        self.cursor, self.floor = None, ""
+        self.floor = ""
 
     def poll(self):
         """Read new hints when the last read is older than `interval`; return the current sequence."""
@@ -34,10 +34,18 @@ class ChangeFeed:
                 return self.sequence
             self.checked_at = now
         low = change_key(now - self.overlap)
+        rows, after = [], low
         try:
-            rows = self.inbox.changes(after=low)
+            # Page through the window so a burst larger than one page is not cut short.
+            while True:
+                batch = self.inbox.changes(after=after, limit=self.page)
+                rows.extend(batch)
+                if len(batch) < self.page:
+                    break
+                after = batch[-1]["RowKey"]
         except AzureError:
-            return self.sequence
+            if not rows:
+                return self.sequence
         fresh = []
         with self.lock:
             self.floor = max(self.floor, low)
@@ -49,8 +57,6 @@ class ChangeFeed:
                 self.sequence += 1
                 self.events.append((self.sequence, row["run_id"]))
                 fresh.append(row["run_id"])
-                if self.cursor is None or row["RowKey"] > self.cursor:
-                    self.cursor = row["RowKey"]
             sequence = self.sequence
         for run_id in dict.fromkeys(fresh):
             self.invalidate(run_id)

@@ -1,15 +1,20 @@
 import hashlib
 import hmac
 import json
+import re
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
-from azure.core.exceptions import ResourceExistsError
+from azure.core.exceptions import HttpResponseError, ResourceExistsError
 from fastapi.testclient import TestClient
 
 from dashboard.auth import Actor, OPERATOR
 from dashboard.changes import ChangeFeed
+from dashboard.config import OBSERVED_WORKFLOWS
 from dashboard.server import create_app
 from dashboard.store import Inbox
 from dashboard.webhook import Rejected, receive
@@ -81,6 +86,22 @@ class ChangeEventTests(unittest.TestCase):
                          [(401, 2, "workflow_run", DELIVERY), (401, 1, "workflow_job", job_delivery)])
         self.assertEqual(self.inbox.rules(401), [])
 
+    def test_a_hint_that_failed_to_store_is_stored_when_github_redelivers(self):
+        class Flaky(SDKTable):
+            fail = True
+
+            def create_entity(self, entity):
+                if self.fail and entity["RowKey"].startswith("chg:"):
+                    self.fail = False
+                    raise HttpResponseError("storage unavailable")
+                super().create_entity(entity)
+
+        self.inbox = Inbox(Flaky(), "23")
+        with self.assertRaises(HttpResponseError):
+            self.receive(*run_event())
+        self.assertTrue(self.receive(*run_event()))
+        self.assertEqual([(c["run_id"], c["delivery_id"]) for c in self.inbox.changes()], [(401, DELIVERY)])
+
     def test_changes_after_a_cursor_are_returned_in_arrival_order(self):
         first, second = str(uuid4()), str(uuid4())
         self.receive(*run_event(), delivery=first)
@@ -120,10 +141,33 @@ class ChangeEventTests(unittest.TestCase):
                 self.assertFalse(self.receive(kind, payload, str(uuid4())))
         self.assertEqual(self.table.rows, {})
 
+    def test_feed_applies_every_hint_when_more_than_one_page_arrives_at_once(self):
+        for run_id in range(1, 251):
+            self.receive(*job_event({"run_id": run_id}), delivery=str(uuid4()))
+        invalidated = []
+        feed = ChangeFeed(self.inbox, invalidated.append, interval=0)
+        self.assertEqual(feed.poll(), 250)
+        self.assertEqual(sorted(invalidated), list(range(1, 251)))
+        self.assertEqual(feed.since(0), (250, list(range(1, 251))))
+
     def test_protection_rule_events_still_create_gate_rows_only(self):
         self.assertTrue(receive(*event(), SECRET, SETTINGS, self.inbox))
         self.assertEqual(len(self.inbox.rules(401)), 1)
         self.assertEqual(self.inbox.changes(), [])
+
+
+class ReceiverAllowlistTests(unittest.TestCase):
+    def test_receiver_loads_without_the_github_client(self):
+        root = Path(__file__).resolve().parents[2]
+        code = "import sys, dashboard.webhook; sys.exit('dashboard.github' in sys.modules)"
+        self.assertEqual(subprocess.run([sys.executable, "-c", code], cwd=root).returncode, 0)
+
+    def test_job_hints_are_allowlisted_by_the_names_of_the_observed_workflow_files(self):
+        root = Path(__file__).resolve().parents[2] / ".github" / "workflows"
+        for path, name in OBSERVED_WORKFLOWS.items():
+            with self.subTest(path=path):
+                declared = re.search(r"^name:\s*(.+?)\s*$", (root / path).read_text(encoding="utf-8"), re.M)[1]
+                self.assertEqual(declared, name)
 
 
 class ChangeStreamTests(unittest.TestCase):

@@ -1,10 +1,13 @@
 import io
 import json
+import re
 import unittest
 import zipfile
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from dashboard.config import Target
+from dashboard.github import GitHub, ReadCache
 from dashboard.memo import AzureMemo, SharedMemo
 from dashboard.evidence import Evidence, UnsafeArtifact, read_member
 from dashboard.observations import (DashboardReader, candidate, job_states, previous_revision, runtime_sample,
@@ -226,6 +229,175 @@ class SharedAzureTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             memo.get("other", broken)
         self.assertEqual(memo.get("other", lambda: "recovered"), "recovered")
+
+
+T0 = datetime(2026, 11, 22, 10, 0, tzinfo=timezone.utc).timestamp()
+
+
+def iso(seconds):
+    return datetime.fromtimestamp(seconds, timezone.utc).isoformat()
+
+
+def release_run(run_id, status, workflow="release.yml"):
+    return {"id": run_id, "path": f".github/workflows/{workflow}", "head_branch": "main", "event": "workflow_dispatch",
+            "repository": {"id": 12}, "run_attempt": 1, "status": status, "head_sha": SHA, "created_at": iso(T0),
+            "conclusion": "success" if status == "completed" else None}
+
+
+class Console:
+    """Snapshot reader over offline fakes: GitHub through the real ReadCache/GitHub client, one injected clock."""
+
+    def __init__(self, status="in_progress"):
+        self.now, self.github_status = T0, 200
+        self.runs = {7: release_run(7, status)}
+        self.jobs, self.rules = {}, {}
+        self.ops = [{"operation_id": "o7", "kind": "deploy", "status": "accepted", "run_id": 7, "actor": "requester",
+                     "created_at": iso(T0)}]
+        self.weights, self.azure_age, self.sample_age, self.azure_down = {}, {}, 0, set()
+        self.audit_down = False
+        self.cache = ReadCache(self._send, clock=lambda: self.now)
+
+        def recent():
+            if self.audit_down:
+                raise ValueError("table unavailable")
+            return self.ops
+
+        store = SimpleNamespace(recent=recent, unresolved=lambda: False, claimed=lambda _: False,
+                                by_run=lambda run_id: next((op for op in self.ops if op.get("run_id") == run_id), None))
+        self.reader = DashboardReader(
+            SimpleNamespace(repo="owner/repo", repo_id=12), TARGETS, GitHub("owner/repo", lambda: "t", self.cache),
+            SimpleNamespace(file=lambda *_, **__: None), SimpleNamespace(rules=lambda run_id: self.rules.get(run_id, [])),
+            store, SimpleNamespace(region=self._azure), cache=self.cache, clock=lambda: self.now)
+
+    def _send(self, method, url, headers, body):
+        if self.github_status != 200:
+            return self.github_status, {"retry-after": "60"} if self.github_status == 429 else {}, None
+        path = url.split("/actions", 1)[1]
+        if path.startswith("/workflows/release.yml/runs?"):
+            return 200, {}, {"workflow_runs": [run for run in self.runs.values() if run["path"].endswith("release.yml")]}
+        if path.startswith("/runs?"):
+            return 200, {}, {"workflow_runs": [run for run in self.runs.values() if run["status"] != "completed"]}
+        match = re.fullmatch(r"/runs/(\d+)(/attempts/1/jobs\?.*)?", path)
+        run_id = int(match.group(1))
+        return 200, {}, ({"jobs": self.jobs.get(run_id, [])} if match.group(2) else self.runs[run_id])
+
+    def _azure(self, target, run_id, detail, baseline):
+        region = target.app_name.split("-", 1)[1]
+        if region in self.azure_down:
+            raise ValueError("ARM unavailable")
+        desired = candidate(target, run_id) if run_id else None
+        weight = self.weights.get(region, 0)
+        traffic = {f"{target.app_name}--r5": 100 - weight, **({desired: weight} if desired else {})}
+        result = {"observed_at": iso(self.now - self.azure_age.get(region, 0)), "traffic": traffic,
+                  "candidate": desired, "candidate_weight": weight if desired else None}
+        if detail:
+            result["revisions"] = [
+                {"name": f"{target.app_name}--r5", "active": True, "health": "Healthy", "sample": None},
+                {"name": desired, "active": True, "health": "Healthy",
+                 "sample": {"replica": "p1", "observed_at": iso(self.now - self.sample_age)}}]
+        return result
+
+    def snapshot(self, run_id=None, region="kr", actor=None):
+        return self.reader.snapshot(actor or SimpleNamespace(roles={"ReleaseApprover"}, object_id="approver"),
+                                    run_id, region)
+
+
+class SnapshotFreshnessTests(unittest.TestCase):
+    def test_github_source_reports_age_of_cached_reads_and_rate_limit_back_off(self):
+        console = Console()
+        self.assertEqual(console.snapshot()["sources"]["github"],
+                         {"observed_at": iso(T0), "age_seconds": 0, "state": "fresh"})
+        console.now += 4
+        self.assertEqual(console.snapshot()["sources"]["github"],
+                         {"observed_at": iso(T0), "age_seconds": 4, "state": "fresh"})
+        console.now += 2
+        console.github_status = 429
+        snapshot = console.snapshot()
+        self.assertFalse(snapshot["github_available"])
+        self.assertEqual(snapshot["sources"]["github"],
+                         {"observed_at": None, "age_seconds": None, "state": "unavailable", "reason": "rate_limited",
+                          "retry_after_seconds": 60})
+
+    def test_github_upstream_failure_is_reported_without_back_off(self):
+        console = Console()
+        console.github_status = 502
+        self.assertEqual(console.snapshot()["sources"]["github"],
+                         {"observed_at": None, "age_seconds": None, "state": "unavailable", "reason": "upstream_error"})
+
+    def test_azure_runtime_and_audit_sources_report_fresh_stale_and_unavailable(self):
+        console = Console()
+        console.azure_age = {"kr": 3, "sea": 20}
+        console.azure_down = {"usw"}
+        console.sample_age = 16
+        sources = console.snapshot(region="kr")["sources"]
+        self.assertEqual(sources["azure:kr"], {"observed_at": iso(T0 - 3), "age_seconds": 3, "state": "fresh"})
+        self.assertEqual(sources["azure:sea"], {"observed_at": iso(T0 - 20), "age_seconds": 20, "state": "stale"})
+        self.assertEqual(sources["azure:usw"], {"observed_at": None, "age_seconds": None, "state": "unavailable",
+                                                "reason": "upstream_error"})
+        self.assertEqual(sources["runtime:app-kr--r7"], {"observed_at": iso(T0 - 16), "age_seconds": 16, "state": "stale"})
+        self.assertEqual(sources["runtime:app-kr--r5"], {"observed_at": None, "age_seconds": None,
+                                                         "state": "unavailable", "reason": "not_produced"})
+        self.assertEqual(sources["audit"], {"observed_at": iso(T0), "age_seconds": 0, "state": "fresh"})
+        self.assertNotIn("runtime:app-sea--r7", sources)
+        console.audit_down = True
+        self.assertEqual(console.snapshot()["sources"]["audit"]["state"], "unavailable")
+
+
+class ApprovalInboxTests(unittest.TestCase):
+    def test_inbox_lists_gates_of_every_active_run_and_region_regardless_of_selection(self):
+        console = Console("completed")
+        console.runs[9] = release_run(9, "waiting")
+        console.jobs[9] = [{"name": "southeastasia / rollout", "status": "waiting"}]
+        console.rules[9] = [{"environment": "prod-sea", "sha": SHA}]
+        console.ops.append({"operation_id": "o9", "kind": "deploy", "status": "accepted", "run_id": 9,
+                            "actor": "requester", "created_at": iso(T0)})
+        snapshot = console.snapshot(run_id=7, region="kr")
+        self.assertEqual(snapshot["pending"], [])
+        self.assertEqual(snapshot["inbox"], [{"operation_id": "o9", "run_id": 9, "kind": "deploy", "region": "sea",
+                                              "environment": "prod-sea", "reason": None, "source_run_id": None}])
+        requester = SimpleNamespace(roles={"ReleaseApprover"}, object_id="requester")
+        self.assertEqual(console.snapshot(run_id=7, region="usw", actor=requester)["inbox"][0]["reason"],
+                         "A different Entra approver is required")
+
+
+class RegionProgressTests(unittest.TestCase):
+    def test_regions_report_current_step_elapsed_failed_step_log_and_traffic_stage(self):
+        console = Console()
+        log = "https://github.com/owner/repo/actions/runs/7/job/{}"
+        console.jobs[7] = [
+            {"name": "korea / rollout", "status": "in_progress", "html_url": log.format(71), "steps": [
+                {"name": "Shift 10%", "status": "completed", "conclusion": "success",
+                 "started_at": "2026-11-22T09:55:00Z"},
+                {"name": "Bake at 50%", "status": "in_progress", "conclusion": None,
+                 "started_at": "2026-11-22T09:58:30Z"}]},
+            {"name": "southeastasia / rollout", "status": "completed", "conclusion": "failure",
+             "html_url": log.format(72), "steps": [
+                 {"name": "Shift 10%", "status": "completed", "conclusion": "success"},
+                 {"name": "Verify health", "status": "completed", "conclusion": "failure"}]},
+            {"name": "westus / rollout", "status": "queued", "html_url": "https://evil.example/owner/repo/actions/runs/7/job/73",
+             "steps": []}]
+        console.weights = {"kr": 50, "sea": 30, "usw": 0}
+        regions = console.snapshot()["regions"]
+        self.assertEqual(regions["kr"]["progress"], {"step": "Bake at 50%", "started_at": iso(T0 - 90),
+                                                     "elapsed_seconds": 90, "failed_step": None,
+                                                     "log_url": log.format(71)})
+        self.assertEqual(regions["sea"]["progress"], {"step": None, "started_at": None, "elapsed_seconds": None,
+                                                      "failed_step": "Verify health", "log_url": log.format(72)})
+        self.assertEqual(regions["usw"]["progress"], {"step": None, "started_at": None, "elapsed_seconds": None,
+                                                      "failed_step": None, "log_url": None})
+        self.assertEqual({r: regions[r]["traffic_stage"] for r in regions}, {"kr": 50, "sea": 10, "usw": 0})
+        self.assertEqual(regions["kr"]["job"], "in_progress")
+
+    def test_traffic_stage_is_unknown_without_azure_or_a_release(self):
+        console = Console()
+        console.azure_down = {"kr"}
+        console.weights = {"sea": 100}
+        regions = console.snapshot()["regions"]
+        self.assertIsNone(regions["kr"]["traffic_stage"])
+        self.assertEqual(regions["sea"]["traffic_stage"], 100)
+        console.runs.clear()
+        console.now += 10
+        self.assertIsNone(console.snapshot()["regions"]["sea"]["traffic_stage"])
 
 
 class ActiveWorkflowTests(unittest.TestCase):

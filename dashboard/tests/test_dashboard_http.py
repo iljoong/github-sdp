@@ -37,6 +37,22 @@ class DashboardHTTPTests(unittest.TestCase):
         data = self.client.get("/api/dashboard?run_id=34&region=sea", headers=self.headers)
         self.assertEqual(data.json(), {"run":34, "region":"sea"})
 
+    def test_snapshot_response_includes_freshness_inbox_and_region_progress(self):
+        from test_dashboard_observations import Console
+
+        self.client.app.state.reader = Console().reader
+        data = self.client.get("/api/dashboard?region=sea", headers=self.headers).json()
+        self.assertEqual(set(data["sources"]), {"github", "audit", "azure:kr", "azure:sea", "azure:usw",
+                                                "runtime:app-sea--r5", "runtime:app-sea--r7"})
+        self.assertEqual(set(data["sources"]["github"]), {"observed_at", "age_seconds", "state"})
+        self.assertEqual(data["sources"]["runtime:app-sea--r5"]["reason"], "not_produced")
+        self.assertEqual(data["inbox"], [])
+        self.assertEqual(set(data["regions"]["kr"]["progress"]),
+                         {"step", "started_at", "elapsed_seconds", "failed_step", "log_url"})
+        self.assertEqual(data["regions"]["kr"]["traffic_stage"], 0)
+        self.assertTrue({"run", "runs", "regions", "build", "pending", "actions", "audit", "observed_at",
+                         "github_available", "audit_available"} <= set(data))
+
     def test_writes_need_origin_and_reject_extra_targets(self):
         command = {"action":"deploy","request_id":"83468040-d438-4007-bf2d-8068282a966d","profile":"demo"}
         self.assertEqual(self.client.post("/api/operations", json=command, headers=self.headers).status_code, 403)

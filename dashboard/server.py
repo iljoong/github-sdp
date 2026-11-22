@@ -68,7 +68,7 @@ async def lifespan(app):
         app.state.verify_session = EntraSession(settings.tenant_id, settings.entra_client_id)
         # Display reads share Azure observations briefly; write-time checks below read Azure directly.
         app.state.reader = DashboardReader(shared, settings.targets, observer, Evidence(observer), inbox, store,
-                                           AzureMemo(azure))
+                                           AzureMemo(azure), cache=read_cache)
         app.state.operations = Operations(store, github, DashboardReader(
             shared, settings.targets, github, Evidence(github), inbox, store, azure), read_cache.invalidate)
         yield

@@ -49,7 +49,8 @@ class Operations:
     def request(self, actor, command):
         authorize(actor, OPERATOR)
         key = command.request_id
-        row = {"kind": command.action, "actor": actor.object_id, "tenant": actor.tenant_id}
+        row = {"kind": command.action, "actor": actor.object_id, "actor_name": actor.display_name,
+               "tenant": actor.tenant_id}
         claim = f"cancel:{command.source_run_id}" if command.action == "cancel" else None
         if claim:
             row["claim"] = claim
@@ -95,6 +96,7 @@ class Operations:
             raise InvalidAction("The environment is no longer waiting for this approval")
         key = str(uuid4())
         self.store.reserve(key, {"kind": "approve" if approved else "reject", "actor": actor.object_id,
+                                 "actor_name": actor.display_name,
                                  "tenant": actor.tenant_id, "source_run_id": run_id, "environment": environment,
                                  "claim": claim})
         try:

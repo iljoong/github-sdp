@@ -48,7 +48,7 @@ az bicep build --file infra\dashboard.bicep --stdout
 | 증상 | 확인할 것 |
 | --- | --- |
 | 환경은 대기 중인데 승인할 수 없음 | 콘솔에서 요청한 동일 run, App 설치, webhook delivery/서명, 해당 환경의 규칙과 GitHub job 상태, Entra 승인자의 역할 및 요청자 분리 |
-| 작업 결과가 `확인 필요` 또는 `reserved`에 머묾 | 진행 중인 쓰기가 끝나기를 기다립니다. `reserved`는 GitHub 요청이 전달됐지만 저장에 실패한 경우에도 남을 수 있습니다. 운영 지원 담당자가 작업 종류에 맞춰 GitHub run/결정 이력의 워크플로·브랜치·입력·원본 실행·요청 시각을 대조하고 Azure 트래픽을 확인합니다. 해당 App의 승인/거부 결과를 job 진행 여부만으로 추정하지 않습니다. 정확한 결과를 입증하지 못하면 쓰기 잠금을 유지하고 재시도하지 않습니다. 입증되면 `dashboardops`에서 `op:<operation_id>` 정정(접수된 dispatch는 확인한 `run_id` 포함), 접수 확인된 승인·거부·취소의 `claim:<op의 claim 값>` 생성(`owner=<operation_id>`), 같은 소유자의 `lock:write` 해제를 한 파티션 트랜잭션으로 처리합니다. 작업 행과 잠금은 조회 당시 ETag를 사용합니다. |
+| 작업 결과가 `확인 필요` 또는 `reserved`에 머묾 | 진행 중인 쓰기가 끝나기를 기다립니다. `reserved`는 GitHub 요청이 전달됐지만 저장에 실패한 경우에도 남을 수 있습니다. 운영 지원 담당자가 작업 종류에 맞춰 GitHub run/결정 이력의 워크플로·브랜치·입력·원본 실행·요청 시각을 대조하고 Azure 트래픽을 확인합니다. 해당 App의 승인/거부 결과를 job 진행 여부만으로 추정하지 않습니다. 정확한 결과를 입증하지 못하면 쓰기 잠금을 유지하고 재시도하지 않습니다. 입증되면 `dashboardops`에서 `op:<operation_id>` 정정(접수된 dispatch는 확인한 `run_id` 포함), 접수된 dispatch의 `run:<run_id>` 색인 행 생성(`operation_id=<operation_id>`), 접수 확인된 승인·거부·취소의 `claim:<op의 claim 값>` 생성(`owner=<operation_id>`), 같은 소유자의 `lock:write` 해제를 한 파티션 트랜잭션으로 처리합니다. 작업 행과 잠금은 조회 당시 ETag를 사용합니다. `recent:<역순 시각>:<operation_id>`와 `run:<run_id>`는 `operation_id`만 담는 조회 색인이며 상태는 항상 `op:` 행을 따릅니다. `meta:index-v1`은 기존 행 색인이 끝났다는 표시이므로 삭제하지 않습니다. |
 | 실행은 완료됐지만 복구/종료 검증이 표시되지 않음 | 해당 시도의 artifact 유무·만료, 원본 run과 stable revision, 현재 실제 트래픽/active 값을 대조합니다. UI의 `GitHub 요청 접수`는 작업의 성공이 아닙니다. |
 | 관제실 중단 또는 보호 규칙 동작 이상 | 기존 안전장치를 삭제하지 말고 변경 요청을 중단합니다. 비상 복구는 승인된 운영 정책과 기존 runbook을 따릅니다. 전환을 되돌리려면 기록한 환경 보호 정책을 복구한 다음 custom rule을 해제합니다. |
 

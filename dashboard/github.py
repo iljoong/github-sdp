@@ -166,6 +166,12 @@ class GitHub:
         return self._pages(f"/workflows/{workflow}/runs?branch=main&event=workflow_dispatch", "workflow_runs",
                            "&", pages=1 if recent else 5)
 
+    def active_runs(self):
+        """One repository-wide query for unfinished main dispatch runs of the observed workflows."""
+        paths = {f".github/workflows/{name}" for name in OBSERVED_WORKFLOWS}
+        return [run for run in self._pages("/runs?branch=main&event=workflow_dispatch", "workflow_runs", "&", pages=1)
+                if run.get("status") != "completed" and str(run.get("path", "")).split("@", 1)[0] in paths]
+
     def jobs(self, run_id, attempt):
         return self._pages(f"/runs/{positive(run_id)}/attempts/{positive(attempt)}/jobs", "jobs")
 

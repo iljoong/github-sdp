@@ -45,8 +45,8 @@ SDP는 "변경은 점진적으로, 관찰 가능하게, 언제든 되돌릴 수 
 
 | 용어 | 의미 | 예 |
 | --- | --- | --- |
-| stable (LKG) | 배포 시작 시 100% 트래픽을 받는 revision | `safeaca-kr-app--bootstrap` |
-| candidate | 이번 release run이 생성하는 revision. 이름이 run ID에 묶임 | `safeaca-kr-app--r1234567890` |
+| stable (LKG) | 배포 시작 시 100% 트래픽을 받는 revision | `<kr-app>--bootstrap` |
+| candidate | 이번 release run이 생성하는 revision. 이름이 run ID에 묶임 | `<kr-app>--r1234567890` |
 | baseline | 배포 직전의 app 상태(트래픽, template, invariant hash 등) snapshot | `state\baseline-kr.json` |
 
 candidate 이름이 `<app>--r<GITHUB_RUN_ID>` 로 고정되므로 **어떤 run이 어떤 revision을

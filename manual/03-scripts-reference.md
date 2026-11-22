@@ -86,11 +86,11 @@ scripts/bootstrap.sh --subscription-id "$subscription" --acr-name "$acr" --prefi
 {
   "kr": {
     "RESOURCE_GROUP": "safeaca-kr",
-    "CONTAINER_APP": "safeaca-kr-app",
+    "CONTAINER_APP": "<kr-app>",
     "LOG_ANALYTICS_WORKSPACE_ID": "<workspace customer GUID>",
     "WORKSPACE_RESOURCE_ID": "/subscriptions/.../workspaces/safeaca-kr-app-logs",
-    "APP_RESOURCE_ID": "/subscriptions/.../containerApps/safeaca-kr-app",
-    "FQDN": "safeaca-kr-app.<hash>.koreacentral.azurecontainerapps.io"
+    "APP_RESOURCE_ID": "/subscriptions/.../containerApps/<kr-app>",
+    "FQDN": "<kr-app>.<hash>.koreacentral.azurecontainerapps.io"
   },
   "sea": { ... }, "usw": { ... }
 }
@@ -201,7 +201,7 @@ foreach ($region in 'kr','sea','usw') {
 ```bash
 scripts/configure-identity.sh --repository "$repo" --environment prod-kr \
   --subscription-id "$subscription" --resource-group safeaca-kr \
-  --container-app safeaca-kr-app --workspace-resource-id "$ws_id" \
+  --container-app "$kr_app" --workspace-resource-id "$ws_id" \
   --workspace-customer-id "$ws_guid" --claims-file "state/oidc-claims/.../claims-prod-kr.json"
 ```
 
@@ -381,7 +381,7 @@ python scripts/rollout.py {deploy|restore} --snapshot <baseline.json> [--profile
 gh run download <SOURCE_RUN_ID> --repo $repo -n "baseline-<SOURCE_RUN_ID>-kr" -D restore-input
 $env:REGION='kr'; $env:SOURCE_RUN_ID='<SOURCE_RUN_ID>'; $env:GITHUB_RUN_ID='<SOURCE_RUN_ID>'
 $env:GITHUB_REPOSITORY=$repo; $env:AZURE_SUBSCRIPTION_ID=$subscription
-$env:RESOURCE_GROUP='safeaca-kr'; $env:CONTAINER_APP='safeaca-kr-app'
+$env:RESOURCE_GROUP='<approved-resource-group>'; $env:CONTAINER_APP='<approved-container-app>'
 python scripts\rollout.py restore --snapshot restore-input\baseline-kr.json
 ```
 

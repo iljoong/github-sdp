@@ -102,6 +102,8 @@ Get-ChildItem evidence-review -Recurse -Filter *.json
 
 ### 절차
 
+관제실의 GitHub App 규칙만 적용된 환경에서는 아래 CLI 요청을 관제실에서 승인할 수 없습니다. 관제실에서 지원하는 지역 단위 롤백은 [관제실 운영 가이드](07-deployment-dashboard.md)를 따릅니다. 관제실을 사용할 수 없거나 별도 복구가 필요하면 사전에 승인·검증된 비상 절차를 따르며, 아래 CLI 명령은 해당 환경의 승인 경로가 별도로 유효할 때만 사용합니다.
+
 ```powershell
 # 1. 원본 release run이 completed 인지 확인
 gh run view <RELEASE_RUN_ID> --repo $repo --json status,conclusion,headBranch

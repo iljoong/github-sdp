@@ -16,6 +16,8 @@
 | 4 | [04-operations-runbook.md](04-operations-runbook.md) | 최초 구성, 릴리스, 모니터링, 복구, 장애 대응 runbook |
 | 5 | [05-zero-downtime-demo.md](05-zero-downtime-demo.md) | 무중단 배포 데모: readiness/SIGTERM drain, `/verify` 화면, 긴 작업, demo retire, 수정 지도 |
 | 6 | [06-zero-downtime-demo-guide.md](06-zero-downtime-demo-guide.md) | 무중단 배포 실습: 사전 점검, 데모 절차, retire 상세, 테스트 방법(화면·폴링·curl·KQL), 실습 교훈 |
+| 7 | [07-deployment-dashboard.md](07-deployment-dashboard.md) | 별도 배포 관제실: Entra 관리자 권한, GitHub App 보호 규칙, 배포 및 전환 |
+| 8 | [08-deployment-dashboard-permissions.md](08-deployment-dashboard-permissions.md) | Azure 재구축 권한과 범위, SAS 갱신, 임시 권한 회수 |
 
 ## 한눈에 보는 파이프라인
 
@@ -57,6 +59,7 @@
 | `.github\workflows\oidc-inspect.yml` | Azure 접근 없이 환경별 OIDC claim만 수집 |
 | `.github\workflows\demo-retire.yml` | 데모 전용: 완료된 release의 이전 revision 비활성화 (SIGTERM 시연) |
 | `app\` | `/`(소개·endpoint 목록), `/healthz`, `/readyz`, `/work`, `/api/version`, `/status`, `/api/long-task`, `/verify` 를 제공하는 데모 앱 |
+| `dashboard\` | 별도 ACA 배포 관제실과 GitHub App webhook 수신기, 전용 테스트 |
 | `infra\` | 공유 ACR / pull identity, 지역별 ACA 환경·앱·Log Analytics (Bicep), probe·grace 정책 |
 | `scripts\` | 구성(bootstrap/identity), 배포(snapshot/rollout/metrics/demo_load), 검증(check_source/inspect_oidc) 도구 |
 | `tests\` | 안전성/health gate/demo load 단위 테스트 |

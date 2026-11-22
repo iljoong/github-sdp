@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>배포 관제실</title>
+  <link rel="stylesheet" href="/assets/dashboard.css">
+  <script defer src="/assets/dashboard.js"></script>
+</head>
+<body>
+  <header>
+    <div class="wrap mast">
+      <strong>배포 관제실</strong>
+      <div class="account">
+        <div class="account-identity" aria-label="현재 계정">
+          <bdi id="account-name">{{account_name}}</bdi>
+          <span class="account-roles" aria-label="관제실 역할">{{account_roles}}</span>
+        </div>
+        <nav class="account-links" aria-label="계정 작업">
+          <a id="switch-account" href="{{switch_account}}">계정 전환</a>
+          <a href="/.auth/logout">로그아웃</a>
+        </nav>
+      </div>
+    </div>
+  </header>
+  <main class="wrap">
+    <div class="intro">
+      <div><h1>safeaca 운영 배포</h1><p>Build → KR → SEA → USW</p></div>
+      <div class="actions">
+        <label for="release">릴리스</label><select id="release"><option value="">현재 실행</option></select>
+        <button id="deploy" class="primary" disabled>새 배포</button>
+      </div>
+    </div>
+    <p id="message" role="status">배포 정보를 불러오는 중입니다.</p>
+    <section class="panel" aria-labelledby="release-title">
+      <div class="spread"><div><h2 id="release-title">릴리스</h2><p id="meta"></p></div><a id="github" hidden>GitHub 실행 보기</a></div>
+      <nav class="rail" aria-label="배포 단계">
+        <div class="station" id="build"><strong>Build</strong><span>미확인</span></div>
+        <button type="button" class="station" data-region="kr" aria-pressed="true"><strong>KR / 한국 중부</strong><span>미확인</span><small></small></button>
+        <button type="button" class="station" data-region="sea" aria-pressed="false"><strong>SEA / 동남아시아</strong><span>미확인</span><small></small></button>
+        <button type="button" class="station" data-region="usw" aria-pressed="false"><strong>USW / 미국 서부</strong><span>미확인</span><small></small></button>
+      </nav>
+    </section>
+    <div class="layout">
+      <section id="regional" class="panel" aria-label="지역 상세"></section>
+      <aside class="panel">
+        <h2>지역 작업</h2>
+        <div id="pending"></div>
+        <div id="operations"></div>
+        <h2>최근 운영 이력</h2>
+        <ol id="audit"></ol>
+      </aside>
+    </div>
+  </main>
+  <dialog id="confirm">
+    <form method="dialog">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-detail"></p>
+      <p id="profile-row" hidden><label for="profile">프로필</label>
+        <select id="profile"><option value="demo">demo</option><option value="production">production</option></select>
+      </p>
+      <footer class="actions"><button value="close" autofocus>닫기</button><button class="primary" value="apply">확인</button></footer>
+    </form>
+  </dialog>
+</body>
+</html>

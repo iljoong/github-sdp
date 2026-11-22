@@ -1,0 +1,7 @@
+fastapi>=0.115,<1
+uvicorn>=0.34,<1
+httpx>=0.28,<1
+azure-identity>=1.19,<2
+azure-data-tables>=12.6,<13
+azure-keyvault-keys>=4.10,<5
+PyJWT[crypto]>=2.10,<3

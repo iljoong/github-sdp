@@ -20,6 +20,7 @@ class DashboardHTTPTests(unittest.TestCase):
         app.state.verify_session = lambda token: Actor(TENANT, USER, frozenset({OPERATOR})) if token == "valid-fixture" else None
         app.state.reader = SimpleNamespace(snapshot=lambda actor, run_id, region: {"run": run_id, "region": region})
         app.state.operations = SimpleNamespace(request=lambda actor, command: {"status": "accepted"})
+        app.state.changes = SimpleNamespace(poll=lambda: 0)
         self.client = TestClient(app, base_url="https://console.example.test")
         self.headers = {"x-ms-client-principal": principal("ReleaseOperator"), "x-ms-token-aad-id-token": "valid-fixture"}
 

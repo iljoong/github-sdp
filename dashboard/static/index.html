@@ -31,21 +31,32 @@
         <button id="deploy" class="primary" disabled>새 배포</button>
       </div>
     </div>
+    <div class="toolbar" role="group" aria-label="갱신 제어">
+      <button type="button" id="live" aria-pressed="true">실시간 갱신</button>
+      <button type="button" id="refresh">새로고침</button>
+      <button type="button" id="notify" aria-pressed="false">승인 요청 알림</button>
+      <span id="connection" data-mode="starting">연결 중</span>
+    </div>
     <p id="message" role="status">배포 정보를 불러오는 중입니다.</p>
+    <ul id="freshness" class="freshness" aria-label="출처별 관찰 시각"></ul>
+    <section id="inbox" class="panel" aria-labelledby="inbox-title">
+      <h2 id="inbox-title">승인 대기</h2>
+      <p id="inbox-empty">모든 지역에 대기 중인 승인 요청이 없습니다.</p>
+      <ol id="inbox-list"></ol>
+    </section>
     <section class="panel" aria-labelledby="release-title">
       <div class="spread"><div><h2 id="release-title">릴리스</h2><p id="meta"></p></div><a id="github" hidden>GitHub 실행 보기</a></div>
       <nav class="rail" aria-label="배포 단계">
-        <div class="station" id="build"><strong>Build</strong><span>미확인</span></div>
-        <button type="button" class="station" data-region="kr" aria-pressed="true"><strong>KR / 한국 중부</strong><span>미확인</span><small></small></button>
-        <button type="button" class="station" data-region="sea" aria-pressed="false"><strong>SEA / 동남아시아</strong><span>미확인</span><small></small></button>
-        <button type="button" class="station" data-region="usw" aria-pressed="false"><strong>USW / 미국 서부</strong><span>미확인</span><small></small></button>
+        <div class="station" id="build"><strong>Build</strong><span class="badge" data-health="unknown">? 미확인</span><span class="status">미확인</span></div>
+        <button type="button" class="station" data-region="kr" aria-pressed="true"><strong>KR / 한국 중부</strong><span class="badge" data-health="unknown">? 미확인</span><span class="status">미확인</span><small class="weight"></small><small class="step"></small><span class="stages" aria-label="트래픽 단계 미확인"><span data-stage="0">0</span><span data-stage="10">10</span><span data-stage="50">50</span><span data-stage="100">100%</span></span></button>
+        <button type="button" class="station" data-region="sea" aria-pressed="false"><strong>SEA / 동남아시아</strong><span class="badge" data-health="unknown">? 미확인</span><span class="status">미확인</span><small class="weight"></small><small class="step"></small><span class="stages" aria-label="트래픽 단계 미확인"><span data-stage="0">0</span><span data-stage="10">10</span><span data-stage="50">50</span><span data-stage="100">100%</span></span></button>
+        <button type="button" class="station" data-region="usw" aria-pressed="false"><strong>USW / 미국 서부</strong><span class="badge" data-health="unknown">? 미확인</span><span class="status">미확인</span><small class="weight"></small><small class="step"></small><span class="stages" aria-label="트래픽 단계 미확인"><span data-stage="0">0</span><span data-stage="10">10</span><span data-stage="50">50</span><span data-stage="100">100%</span></span></button>
       </nav>
     </section>
     <div class="layout">
       <section id="regional" class="panel" aria-label="지역 상세"></section>
       <aside class="panel">
         <h2>지역 작업</h2>
-        <div id="pending"></div>
         <div id="operations"></div>
         <h2>최근 운영 이력</h2>
         <ol id="audit"></ol>

@@ -38,10 +38,29 @@ main.wrap { padding-block: 26px 56px }
 .station:not(:last-child)::after { content: ""; position: absolute; top: 50%; left: 100%; width: 17px; border-top: 2px solid #9aacc3; pointer-events: none }
 .station > * { display: block }
 .station[aria-pressed=true] { border-color: var(--blue); background: #eef3ff }
-.station span { margin-top: 6px }
-.station[data-status=waiting] span { color: #885009 }
-.station[data-status=failure] span { color: #a1283b }
-.station[data-status=success] span { color: #00675a }
+.station .badge { display: inline-block; margin-top: 6px; border: 1px solid currentColor; border-radius: 4px; padding: 0 6px; font-weight: 650; font-size: .85rem }
+.station .status { color: var(--muted); font-size: .88rem }
+[data-health=healthy] { color: #00675a }
+[data-health=progressing] { color: #184aca }
+[data-health=degraded] { color: #a1283b }
+[data-health=waiting] { color: #885009 }
+[data-health=unknown] { color: var(--muted) }
+.station .stages { display: flex; gap: 3px; margin-top: 6px }
+.stages span { flex: 1; text-align: center; font-size: .72rem; border-radius: 3px; background: #e0e7ef; color: var(--muted) }
+.stages span[data-reached] { background: var(--blue); color: white }
+.toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 14px }
+#live[aria-pressed=true], #notify[aria-pressed=true] { border-color: var(--blue); background: #eef3ff }
+#connection { font-size: .88rem; color: var(--muted) }
+#connection[data-mode=backoff], #connection[data-mode=paused] { color: #885009; font-weight: 650 }
+.freshness { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; padding: 0; list-style: none }
+.freshness li { border: 1px solid var(--line); border-radius: 4px; padding: 1px 7px; font-size: .82rem; background: white }
+.freshness li[data-state=stale] { border-color: #be7a22; color: #885009; background: #fff7e8 }
+.freshness li[data-state=unavailable] { border-color: #a1283b; color: #a1283b; background: #fdf0f2 }
+#inbox { margin-bottom: 15px }
+#inbox-list { margin: 0 }
+#inbox-list li { border-bottom: 0 }
+.request .reason { color: #885009 }
+.request .actions .command { margin-bottom: 0 }
 .layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); align-items: start; gap: 15px; margin-top: 15px }
 .panel > * + * { margin-top: 12px }
 .request { border-left: 4px solid #be7a22; padding: 10px; background: #fff7e8; margin-bottom: 8px }

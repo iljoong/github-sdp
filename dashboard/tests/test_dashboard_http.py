@@ -1,5 +1,6 @@
 import base64
 import json
+import re
 import unittest
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
@@ -53,6 +54,27 @@ class DashboardHTTPTests(unittest.TestCase):
         self.assertEqual(data["regions"]["kr"]["traffic_stage"], 0)
         self.assertTrue({"run", "runs", "regions", "build", "pending", "actions", "audit", "observed_at",
                          "github_available", "audit_available"} <= set(data))
+
+    def test_console_assets_stay_within_the_content_security_policy(self):
+        page = self.client.get("/", headers=self.headers)
+        csp = page.headers["content-security-policy"]
+        self.assertIn("script-src 'self'", csp)
+        self.assertIn("style-src 'self'", csp)
+        self.assertNotIn("unsafe-inline", csp)
+        self.assertNotRegex(page.text, r"<script(?![^>]*\bsrc=)[^>]*>")
+        self.assertNotRegex(page.text, r"<style|\sstyle=|\son[a-z]+=")
+        script = self.client.get("/assets/dashboard.js", headers=self.headers)
+        self.assertEqual(script.status_code, 200)
+        self.assertIn("default-src 'self'", script.headers["content-security-policy"])
+        # Data is rendered as DOM text only; no HTML sinks or string evaluation.
+        self.assertNotRegex(script.text, r"innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\(|new Function|\.style\b")
+
+    def test_deep_link_to_a_release_and_region_opens_the_console_with_live_controls(self):
+        page = self.client.get("/?run=34&region=sea", headers=self.headers)
+        self.assertEqual(page.status_code, 200)
+        ids = set(re.findall(r'\sid="([^"]+)"', page.text))
+        self.assertLessEqual({"inbox", "live", "refresh", "notify", "freshness", "connection", "regional", "release"}, ids)
+        self.assertEqual(self.client.get("/?run=34&region=sea").status_code, 403)
 
     def test_writes_need_origin_and_reject_extra_targets(self):
         command = {"action":"deploy","request_id":"83468040-d438-4007-bf2d-8068282a966d","profile":"demo"}

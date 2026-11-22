@@ -19,6 +19,7 @@ from .changes import ChangeFeed
 from .config import Settings, positive
 from .evidence import Evidence
 from .github import GitHub, ReadCache, RemoteError, Tokens, close_transport
+from .memo import AzureMemo
 from .observations import DashboardReader, AzureReader
 from .operations import Command, InvalidAction, Operations
 from .store import Conflict, Inbox, OperationsTable, table_clients
@@ -56,6 +57,7 @@ async def lifespan(app):
     credential = ManagedIdentityCredential(client_id=os.environ["DASHBOARD_MI_CLIENT_ID"])
     service = table_clients(settings.shared, credential)
     signing = CryptographyClient(settings.signing_key, credential)
+    azure = AzureReader(credential)
     try:
         sign = lambda digest: signing.sign(SignatureAlgorithm.rs256, digest).signature
         shared = settings.shared
@@ -68,13 +70,15 @@ async def lifespan(app):
         app.state.settings = settings
         app.state.read_cache = read_cache
         app.state.verify_session = EntraSession(settings.tenant_id, settings.entra_client_id)
-        azure = AzureReader(credential)
-        app.state.reader = DashboardReader(shared, settings.targets, observer, Evidence(observer), inbox, store, azure)
+        # Display reads share Azure observations briefly; write-time checks below read Azure directly.
+        app.state.reader = DashboardReader(shared, settings.targets, observer, Evidence(observer), inbox, store,
+                                           AzureMemo(azure))
         app.state.changes = ChangeFeed(inbox, read_cache.invalidate)
         app.state.operations = Operations(store, github, DashboardReader(
             shared, settings.targets, github, Evidence(github), inbox, store, azure), read_cache.invalidate)
         yield
     finally:
+        azure.close()
         close_transport()
         signing.close()
         service.close()

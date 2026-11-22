@@ -91,7 +91,7 @@ class OperationsTests(unittest.TestCase):
 
         def transport(method, url, headers, body):
             calls.append(url.split("/actions")[1])
-            if "/workflows/" in url:
+            if "/workflows/" in url or "/runs?" in url:
                 return 200, {}, {"workflow_runs": []}
             return 200, {}, {"id": int(url.rsplit("/", 1)[1]), "status": "completed"}
 
@@ -103,11 +103,13 @@ class OperationsTests(unittest.TestCase):
             observer.run(234)
             observer.run(235)
             observer.runs(recent=True)
+            observer.active_runs()
 
         reads()
         ops.request(self.operator, Command("cancel", self.key, source_run_id=234))
         reads()
-        self.assertEqual(calls[3:], ["/runs/234", "/workflows/release.yml/runs?branch=main&event=workflow_dispatch&per_page=100&page=1"])
+        self.assertEqual(calls[4:], ["/runs/234", "/workflows/release.yml/runs?branch=main&event=workflow_dispatch&per_page=100&page=1",
+                                     "/runs?branch=main&event=workflow_dispatch&per_page=100&page=1"])
         del calls[:]
         ops.request(self.operator, Command("deploy", str(uuid4()), profile="demo"))
         ops.review(self.approver, self.store.by_run(234)["operation_id"], "prod-kr", True)

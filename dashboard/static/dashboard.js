@@ -170,7 +170,7 @@ function render(data) {
   $("audit").replaceChildren(...data.audit.map(row => {
     const entry = node("li", `${labels[row.kind] ?? row.kind} · ${label(row.status)}`);
     entry.append(node("small", `${timestamp(row.created_at)} · 실행 ${row.run_id ?? row.source_run_id ?? "미확인"}`),
-      node("small", `Entra 사용자 ${row.actor}`));
+      node("small", row.actor_name ? `${row.actor_name} · Entra 사용자 ${row.actor}` : `Entra 사용자 ${row.actor}`));
     return entry;
   }));
 }

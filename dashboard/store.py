@@ -1,4 +1,7 @@
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from itertools import islice
 
 from azure.core.exceptions import HttpResponseError, ResourceExistsError, ResourceNotFoundError
 from azure.data.tables import TableServiceClient
@@ -6,6 +9,10 @@ from azure.data.tables import TableServiceClient
 
 def stamp():
     return datetime.now(timezone.utc).isoformat()
+
+
+RECENT_SPAN = 10 ** 13
+INDEX_MARKER = "meta:index-v1"
 
 
 class Conflict(Exception):
@@ -35,9 +42,18 @@ class Inbox:
             parameters={"p": self.partition, "low": f"{run_id}:", "high": f"{run_id};"}))
 
 
+def _recent_key(created_at, operation_id):
+    millis = int(datetime.fromisoformat(created_at).timestamp() * 1000)
+    return f"recent:{RECENT_SPAN - millis:013d}:{operation_id}"
+
+
 class OperationsTable:
-    def __init__(self, table, partition):
-        self.table, self.partition = table, partition
+    """Audit rows: op:<id> (authoritative), lock:<slot>, claim:<claim>, plus pointer indexes
+    recent:<reverse millis>:<id> and run:<run_id> that hold only operation_id."""
+
+    def __init__(self, table, partition, clock=time.time):
+        self.table, self.partition, self.clock = table, partition, clock
+        self.indexed = False
 
     def _entity(self, key, values):
         row = {**values, "PartitionKey": self.partition, "RowKey": key}
@@ -64,11 +80,13 @@ class OperationsTable:
         return self._decode(self._get(f"op:{operation_id}"))
 
     def reserve(self, operation_id, values, slot="write"):
+        created = datetime.fromtimestamp(self.clock(), timezone.utc).isoformat()
         row = self._entity(f"op:{operation_id}", {**values, "operation_id": operation_id,
-                                               "status": "reserved", "created_at": stamp()})
+                                               "status": "reserved", "created_at": created})
         lock = self._entity(f"lock:{slot}", {"owner": operation_id})
+        recent = self._entity(_recent_key(created, operation_id), {"operation_id": operation_id})
         try:
-            self.table.submit_transaction([("create", row), ("create", lock)])
+            self.table.submit_transaction([("create", row), ("create", lock), ("create", recent)])
         except HttpResponseError as error:
             if _is_conflict(error):
                 raise Conflict("Operation already requested or another write is unresolved") from None
@@ -90,20 +108,56 @@ class OperationsTable:
         changes = [("update", self._entity(row["RowKey"], {**row, **updates, "updated_at": stamp()}), match)]
         if row.get("claim") and updates["status"] == "accepted":
             changes.append(("create", self._entity(f"claim:{row['claim']}", {"owner": operation_id})))
+        if updates.get("run_id"):
+            changes.append(("upsert", self._entity(f"run:{updates['run_id']}", {"operation_id": operation_id}),
+                            {"mode": "replace"}))
         if release:
             changes.append(("delete", self._entity(f"lock:{slot}", {}),
                             {"etag": lock.metadata["etag"], "match_condition": MatchConditions.IfNotModified}))
         self.table.submit_transaction(changes)
 
+    def _range(self, prefix, limit=None):
+        rows = self.table.query_entities(
+            "PartitionKey eq @p and RowKey ge @low and RowKey lt @high",
+            parameters={"p": self.partition, "low": prefix, "high": prefix[:-1] + chr(ord(prefix[-1]) + 1)},
+            **({"results_per_page": limit} if limit else {}))
+        return list(islice(rows, limit)) if limit else list(rows)
+
+    def _ensure_index(self):
+        # Rows written before the indexes existed are indexed once; the marker stops later scans.
+        if self.indexed or self._get(INDEX_MARKER) is not None:
+            self.indexed = True
+            return
+        for row in self._range("op:"):
+            keys = []
+            try:
+                keys.append(_recent_key(row["created_at"], row["operation_id"]))
+            except (KeyError, TypeError, ValueError):
+                pass
+            if row.get("run_id"):
+                keys.append(f"run:{row['run_id']}")
+            for key in keys:
+                try:
+                    self.table.create_entity(self._entity(key, {"operation_id": row["operation_id"]}))
+                except ResourceExistsError:
+                    pass
+        try:
+            self.table.create_entity(self._entity(INDEX_MARKER, {"created_at": stamp()}))
+        except ResourceExistsError:
+            pass
+        self.indexed = True
+
     def by_run(self, run_id):
-        return self._decode(next(iter(self.table.query_entities(
-            "PartitionKey eq @p and run_id eq @id", parameters={"p": self.partition, "id": str(run_id)})), None))
+        self._ensure_index()
+        index = self._get(f"run:{run_id}")
+        row = self.get(index["operation_id"]) if index else None
+        return row if row and str(row.get("run_id")) == str(run_id) else None
 
     def recent(self, limit=25):
-        rows = self.table.query_entities(
-            "PartitionKey eq @p and RowKey ge 'op:' and RowKey lt 'op;'",
-            parameters={"p": self.partition})
-        return [self._decode(row) for row in sorted(rows, key=lambda row: row["created_at"], reverse=True)[:limit]]
+        self._ensure_index()
+        ids = [row["operation_id"] for row in self._range("recent:", limit)]
+        with ThreadPoolExecutor(max_workers=min(8, len(ids) or 1)) as pool:
+            return [row for row in pool.map(self.get, ids) if row is not None]
 
     def unresolved(self):
         return self._get("lock:write") is not None

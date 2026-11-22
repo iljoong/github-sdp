@@ -7,7 +7,7 @@ from azure.core.exceptions import AzureError
 
 from .auth import APPROVER, OPERATOR
 from .config import REGIONS, positive
-from .github import OBSERVED_WORKFLOWS, RemoteError
+from .github import RemoteError
 from .operations import InvalidAction, WORKFLOW, review_claim
 from .store import stamp
 
@@ -69,27 +69,34 @@ def _host(host):
 
 
 class AzureReader:
-    def __init__(self, credential):
+    def __init__(self, credential, http=None, probe=None):
         self.credential = credential
+        self.http = http or httpx.Client(follow_redirects=False, timeout=8, trust_env=False)
+        self.probe = probe or httpx.Client(timeout=3, follow_redirects=False, trust_env=False)
+        self.probes = ThreadPoolExecutor(max_workers=6)
+
+    def close(self):
+        self.probes.shutdown(wait=False)
+        self.http.close()
+        self.probe.close()
 
     def _arm(self, path):
         url = f"{ARM}{path}?api-version={API_VERSION}"
         token = self.credential.get_token(f"{ARM}/.default").token
-        with httpx.Client(follow_redirects=False, timeout=8, trust_env=False) as client:
-            rows = []
-            for _ in range(10):
-                response = client.get(url, headers={"Authorization": f"Bearer {token}"})
-                response.raise_for_status()
-                result = response.json()
-                if "value" not in result:
-                    return result
-                rows.extend(result["value"])
-                url = result.get("nextLink")
-                if not url:
-                    return rows
-                parsed = urlsplit(url)
-                if parsed.scheme != "https" or parsed.netloc != "management.azure.com" or parsed.path.lower() != path.lower():
-                    raise ValueError("Unexpected Azure pagination URL")
+        rows = []
+        for _ in range(10):
+            response = self.http.get(url, headers={"Authorization": f"Bearer {token}"})
+            response.raise_for_status()
+            result = response.json()
+            if "value" not in result:
+                return result
+            rows.extend(result["value"])
+            url = result.get("nextLink")
+            if not url:
+                return rows
+            parsed = urlsplit(url)
+            if parsed.scheme != "https" or parsed.netloc != "management.azure.com" or parsed.path.lower() != path.lower():
+                raise ValueError("Unexpected Azure pagination URL")
         raise ValueError("Azure result exceeds pagination limit")
 
     def region(self, target, run_id, detail=False, baseline=None):
@@ -137,24 +144,23 @@ class AzureReader:
             row["sample"] = self._sample(fields.get("fqdn"), name)
         return result
 
-    @staticmethod
-    def _sample(host, revision):
+    def _sample(self, host, revision):
         if not _host(host) or not host.startswith(revision + "."):
             return None
         try:
-            with httpx.Client(timeout=3, follow_redirects=False, trust_env=False) as http:
-                status = http.get(f"https://{host}/status")
-                version = http.get(f"https://{host}/api/version")
-                status.raise_for_status()
-                version.raise_for_status()
-                sample = runtime_sample(status.json(), revision)
-                ver = version.json()
-                if sample is not None:
-                    if ver.get("revision") == revision:
-                        sample["version"] = ver.get("version")
-                        sample["version_replica"] = ver.get("replica")
-                    sample["observed_at"] = stamp()
-                return sample
+            status, version = (self.probes.submit(self.probe.get, f"https://{host}{path}")
+                               for path in ("/status", "/api/version"))
+            status, version = status.result(), version.result()
+            status.raise_for_status()
+            version.raise_for_status()
+            sample = runtime_sample(status.json(), revision)
+            ver = version.json()
+            if sample is not None:
+                if ver.get("revision") == revision:
+                    sample["version"] = ver.get("version")
+                    sample["version_replica"] = ver.get("replica")
+                sample["observed_at"] = stamp()
+            return sample
         except SOURCE_ERRORS:
             return None
 
@@ -240,8 +246,7 @@ class DashboardReader:
         return None
 
     def _active(self):
-        return any(run.get("status") != "completed" for workflow in sorted(OBSERVED_WORKFLOWS)
-                   for run in self.github.runs(workflow, recent=True))
+        return bool(self.github.active_runs())
 
     def check(self, command):
         if command.action != "cancel" and self._active():
@@ -361,7 +366,8 @@ class DashboardReader:
                 except SOURCE_ERRORS:
                     reason = "Recovery evidence is unavailable"
             reasons[action] = reason
-        public = ("operation_id", "kind", "status", "created_at", "actor", "source_run_id", "run_id", "environment", "region")
+        public = ("operation_id", "kind", "status", "created_at", "actor", "actor_name", "source_run_id", "run_id",
+                  "environment", "region")
         return {"run": ({**self._view_run(run), "profile": current.get("profile") if current else None} if run else None),
                 "runs": [self._view_run(row) for row in recent[:20]], "regions": regions, "build": states.get("build", "unknown"),
                 "pending": pending, "actions": reasons, "audit": [{k: row[k] for k in public if k in row} for row in audit],

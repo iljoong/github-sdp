@@ -43,8 +43,8 @@ class Command:
 
 
 class Operations:
-    def __init__(self, store, github, reader):
-        self.store, self.github, self.reader = store, github, reader
+    def __init__(self, store, github, reader, invalidate=lambda run_id=None: None):
+        self.store, self.github, self.reader, self.invalidate = store, github, reader, invalidate
 
     def request(self, actor, command):
         authorize(actor, OPERATOR)
@@ -73,7 +73,7 @@ class Operations:
             run_id = self.github.dispatch(WORKFLOW[command.action], inputs)
             return {"run_id": run_id}
 
-        return self._write(key, send)
+        return self._write(key, send, command.source_run_id)
 
     def review(self, actor, operation_id, environment, approved):
         authorize(actor, APPROVER)
@@ -110,9 +110,9 @@ class Operations:
             self.github.review_rule(run_id, environment, approved, "Decision recorded by the Entra deployment console.")
             return {}
 
-        return self._write(key, send)
+        return self._write(key, send, run_id)
 
-    def _write(self, key, send):
+    def _write(self, key, send, run_id=None):
         try:
             result = {"status": "accepted", **send()}
         except RemoteError as error:
@@ -120,5 +120,7 @@ class Operations:
         except Exception:
             # A post-send exception must never lead to an automatic replay.
             result = {"status": "confirmation_required"}
+        # Any write attempt may have changed GitHub state, so cached reads must not hide it.
+        self.invalidate(result.get("run_id", run_id))
         self.store.finish(key, result, release=result["status"] != "confirmation_required")
         return {"operation_id": key, **result}

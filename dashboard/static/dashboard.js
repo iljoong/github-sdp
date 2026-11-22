@@ -53,8 +53,22 @@ const sourceReasons = {rate_limited: "GitHub 호출 제한", upstream_error: "�
 const POLL = {stream: 60000, active: 5000, idle: 30000, retryStream: 60000, backoffMax: 120000};
 const STALE_SECONDS = 60;
 const baseTitle = document.title;
+const SVG = "http://www.w3.org/2000/svg";
+// Stroke icons (24×24 paths) built as DOM nodes; the CSP forbids inline markup and styles.
+const ICONS = {
+  logo: ["M4 17l5-5 4 4 7-8", "M15 8h5v5"],
+  live: ["M12 12m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0", "M7.8 7.8a6 6 0 0 0 0 8.4", "M16.2 16.2a6 6 0 0 0 0-8.4",
+         "M5 5a10 10 0 0 0 0 14", "M19 19a10 10 0 0 0 0-14"],
+  pause: ["M9 5v14", "M15 5v14"],
+  refresh: ["M20 11a8 8 0 1 0-2.3 5.7", "M20 4v7h-7"],
+  bell: ["M6 16V11a6 6 0 0 1 12 0v5l2 2H4z", "M10 20a2 2 0 0 0 4 0"],
+  github: ["M14 4h6v6", "M20 4l-9 9", "M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"],
+  plus: ["M12 5v14", "M5 12h14"],
+  signout: ["M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3", "M10 17l-5-5 5-5", "M5 12h11"]
+};
+const tabs = [...document.querySelectorAll("[role=tab]")];
 
-let selected = "kr", seq = 0, selectedRun = "", timer, soonTimer, writing = false, callback;
+let selected = "kr", seq = 0, selectedRun = "", timer, soonTimer, writing = false, callback, tab = "overview";
 let data = null, receivedAt = 0, errors = 0, live = true, stream = null, streamOpen = false, streamOpened = false;
 let streamRetryAt = 0, nextPollAt = 0, seenInbox = null, typedRegion = null;
 const decided = new Map();
@@ -90,6 +104,32 @@ function duration(seconds) {
 
 function setStatus(value) { $("message").textContent = value; }
 function label(value) { return statuses[value] ?? value ?? "미확인"; }
+
+function icon(el, name) {
+  const svg = document.createElementNS(SVG, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  for (const d of ICONS[name]) {
+    const path = document.createElementNS(SVG, "path");
+    path.setAttribute("d", d);
+    svg.append(path);
+  }
+  el.dataset.icon = name;
+  el.replaceChildren(svg);
+}
+
+function ago(value) {
+  const at = Date.parse(value);
+  if (Number.isNaN(at)) return "시작 시각 미확인";
+  const s = Math.max(0, (Date.now() - at) / 1000);
+  if (s < 60) return "방금";
+  if (s < 3600) return `${Math.floor(s / 60)}분 전`;
+  if (s < 86400) return `${Math.floor(s / 3600)}시간 전`;
+  return `${Math.floor(s / 86400)}일 전`;
+}
+
+function runTitle(run) { return run.display_title || `릴리스 #${run.id}`; }
 
 // Keyed, incremental rendering: an entry whose data is unchanged keeps its DOM node (and with it open
 // sections, scroll offsets and focus); changed entries are rebuilt by build(value, previousNode, key).
@@ -288,12 +328,49 @@ function historyEntry({entry, current}) {
     pick.onclick = () => selectRun(String(entry.id));
     head.append(pick);
   }
-  item.append(head,
+  item.append(head);
+  if (entry.display_title) item.append(node("span", entry.display_title));
+  item.append(
     node("small", `시작 ${timestamp(entry.started_at)} · 소요 ${entry.duration_seconds == null ? "미확인" : duration(entry.duration_seconds)} · 프로필 ${entry.profile ?? "미확인"}`),
     node("small", `커밋 ${entry.commit?.slice(0, 7) ?? "미확인"} · 요청자 ${entry.requester ?? "미확인"}`));
   const actions = node("div"); actions.className = "actions";
   actions.append(...["rollback", "retire"].map(kind => commandButton(kind, entry.actions?.[kind], entry.id)));
   item.append(actions);
+  return item;
+}
+
+// Sidebar release list: recent runs with their history details, plus the displayed run when it is older.
+function releaseEntries(snapshot) {
+  const details = new Map((snapshot.history ?? []).map(entry => [String(entry.id), entry]));
+  const rows = new Map((snapshot.runs ?? []).map(row => [String(row.id), {...row, ...details.get(String(row.id))}]));
+  for (const [id, entry] of details) if (!rows.has(id)) rows.set(id, entry);
+  const current = snapshot.run ? String(snapshot.run.id) : selectedRun;
+  if (current && !rows.has(current)) rows.set(current, snapshot.run ?? {id: current});
+  // Only the displayed fields, so that an entry is redrawn only when what it shows changes.
+  return [...rows].map(([id, row]) => [id, {
+    id, current: id === current, state: row.conclusion || row.status || "unknown", title: row.display_title,
+    profile: row.profile, commit: (row.commit ?? row.head_sha)?.slice(0, 7), started: row.started_at ?? row.created_at,
+    requester: row.requester
+  }]);
+}
+
+function releaseItem(row) {
+  const item = node("li");
+  const button = node("button"); button.type = "button"; button.className = "release-item";
+  button.dataset.state = row.state;
+  if (row.current) button.setAttribute("aria-current", "true");
+  button.onclick = () => selectRun(row.id);
+  const top = node("span"); top.className = "release-top";
+  const dot = node("span"); dot.className = "dot"; dot.setAttribute("aria-hidden", "true");
+  const state = node("span", label(row.state)); state.className = "release-state";
+  top.append(dot, node("strong", `#${row.id}`), state);
+  const name = node("span", row.title || "이름 미확인"); name.className = "release-name";
+  const meta = node("small", `${row.profile ?? "프로필 미확인"} · ${row.commit ?? "커밋 미확인"} · `);
+  const started = node("time", ago(row.started));
+  started.dateTime = row.started ?? "";
+  meta.append(started);
+  button.append(top, name, meta, node("small", `요청자 ${row.requester ?? "미확인"}`));
+  item.append(button);
   return item;
 }
 
@@ -356,6 +433,10 @@ function renderInbox() {
   $("inbox-truncated").hidden = !data?.inbox_truncated;
   const mine = items.filter(gate => !gate.reason);
   $("inbox-title").textContent = items.length ? `승인 대기 ${items.length}건 · 내가 승인 가능 ${mine.length}건` : "승인 대기";
+  $("inbox-count").textContent = items.length ? String(items.length) : "";
+  // The tab stands out while the signed-in user can decide a gate, whichever tab is open.
+  $("tab-inbox").toggleAttribute("data-attention", mine.length > 0);
+  $("tab-inbox").title = mine.length ? `내가 승인 가능 ${mine.length}건` : "";
   document.title = mine.length ? `(${mine.length}) ${baseTitle}` : baseTitle;
   const keys = new Set(mine.map(gateKey));
   if (seenInbox && notificationsOn()) {
@@ -369,17 +450,9 @@ function renderInbox() {
 
 function render(snapshot) {
   const run = snapshot.run;
-  const picker = $("release");
-  const options = [["", "현재 실행"], ...snapshot.runs.map(r => [String(r.id), `#${r.id} · ${label(r.conclusion || r.status)}`])];
-  if (selectedRun && !options.some(([value]) => value === selectedRun)) options.push([selectedRun, `#${selectedRun}`]);
-  const optionsSignature = JSON.stringify(options);
-  if (signatures.get(picker) !== optionsSignature) {
-    keyed(picker, options, (name, previous, value) => new Option(name, value));
-    signatures.set(picker, optionsSignature);
-  }
-  picker.value = selectedRun;
-  $("release-title").textContent = run ? `릴리스 #${run.id}` : "선택 가능한 릴리스 없음";
-  $("meta").textContent = run ? `main · ${run.profile || "프로필 미확인"} · ${run.head_sha?.slice(0, 7) ?? "SHA 미확인"} · ${label(run.conclusion || run.status)}` : "";
+  keyed($("releases"), releaseEntries(snapshot), releaseItem);
+  $("release-title").textContent = run ? runTitle(run) : "선택 가능한 릴리스 없음";
+  $("meta").textContent = run ? `#${run.id} · main · ${run.profile || "프로필 미확인"} · ${run.head_sha?.slice(0, 7) ?? "SHA 미확인"} · ${label(run.conclusion || run.status)}` : "";
   const link = $("github");
   link.hidden = !run?.url;
   if (run?.url) link.href = run.url;
@@ -469,6 +542,7 @@ function tick() {
   for (const [key, r] of Object.entries(data.regions)) {
     document.querySelector(`[data-region="${key}"] .step`).textContent = stepText(r.progress);
   }
+  for (const time of $("releases").querySelectorAll("time")) time.textContent = ago(time.dateTime);
   connection();
 }
 
@@ -663,16 +737,34 @@ function readLocation() {
   selected = Object.hasOwn(regionNames, query.get("region") ?? "") ? query.get("region") : "kr";
   selectedRun = /^[1-9][0-9]{0,18}$/.test(query.get("run") ?? "") ? query.get("run") : "";
   document.querySelectorAll("[data-region]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.region === selected)));
-  if ([...$("release").options].some(o => o.value === selectedRun)) $("release").value = selectedRun;
+  showTab(tabs.some(t => t.dataset.tab === query.get("tab")) ? query.get("tab") : "overview");
 }
 
-// Selected release and region live in the URL (?run=&region=) so links can be shared and Back works.
-function navigate() {
+// Selected release, region and tab live in the URL (?run=&region=&tab=) so links can be shared; release and
+// region changes are history entries (Back restores them), tab changes only replace the current entry.
+function navigate(replace = false) {
   const query = new URLSearchParams();
   if (selectedRun) query.set("run", selectedRun);
   query.set("region", selected);
+  if (tab !== "overview") query.set("tab", tab);
   const url = `${location.pathname}?${query}`;
-  if (url !== location.pathname + location.search) history.pushState(null, "", url);
+  if (url !== location.pathname + location.search) history[replace ? "replaceState" : "pushState"](null, "", url);
+}
+
+function showTab(name, focus = false) {
+  tab = name;
+  for (const t of tabs) {
+    const on = t.dataset.tab === name;
+    t.setAttribute("aria-selected", String(on));
+    t.tabIndex = on ? 0 : -1;
+    $(t.getAttribute("aria-controls")).hidden = !on;
+    if (on && focus) t.focus();
+  }
+}
+
+function openTab(name, focus = false) {
+  showTab(name, focus);
+  navigate(true);
 }
 
 function notificationsOn() {
@@ -688,6 +780,8 @@ async function toggleNotifications() {
 function setLive(value) {
   live = value;
   $("live").setAttribute("aria-pressed", String(live));
+  icon($("live"), live ? "live" : "pause");
+  $("live").title = live ? "실시간 갱신 중 (L: 일시정지)" : "일시정지됨 (L: 실시간 갱신)";
   if (live) {
     streamRetryAt = 0;
     openStream();
@@ -699,7 +793,7 @@ function setLive(value) {
   }
 }
 
-$("release").onchange = () => selectRun($("release").value);
+for (const el of document.querySelectorAll("[data-icon]")) icon(el, el.dataset.icon);
 $("deploy").onclick = () => confirm("deploy", null, null);
 $("refresh").onclick = () => refresh();
 $("live").onclick = () => setLive(!live);
@@ -709,6 +803,23 @@ $("notify").setAttribute("aria-pressed", String(notificationsOn()));
 $("typed").addEventListener("input", checkTyped);
 $("confirm").addEventListener("close", () => { if ($("confirm").returnValue === "apply" && typedOk()) callback(); });
 for (const el of document.querySelectorAll("[data-region]")) el.onclick = () => selectRegion(el.dataset.region);
+// ARIA tabs: arrow keys move between tabs (with wrap-around), Home/End jump to the first/last tab.
+tabs.forEach((t, index) => {
+  t.onclick = () => openTab(t.dataset.tab);
+  t.onkeydown = event => {
+    const target = {ArrowRight: index + 1, ArrowLeft: index - 1, Home: 0, End: tabs.length - 1}[event.key];
+    if (target === undefined) return;
+    event.preventDefault();
+    openTab(tabs[(target + tabs.length) % tabs.length].dataset.tab, true);
+  };
+});
+const account = $("account");
+document.addEventListener("click", event => { if (account.open && !account.contains(event.target)) account.open = false; });
+account.addEventListener("keydown", event => {
+  if (event.key !== "Escape" || !account.open) return;
+  account.open = false;
+  account.querySelector("summary").focus();
+});
 // Shortcuts use physical keys (event.code) so they also work with a Korean keyboard layout.
 document.addEventListener("keydown", event => {
   if (event.defaultPrevented || event.repeat || event.ctrlKey || event.metaKey || event.altKey || $("confirm").open) return;

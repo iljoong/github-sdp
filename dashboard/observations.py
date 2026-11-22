@@ -340,6 +340,7 @@ class DashboardReader:
 
     def _view_run(self, run):
         summary = {k: run.get(k) for k in ("id", "status", "conclusion", "head_sha", "run_attempt", "created_at")}
+        summary["display_title"] = run.get("display_title") or run.get("name")
         summary["url"] = f"https://github.com/{self.shared.repo}/actions/runs/{positive(run['id'])}"
         return summary
 

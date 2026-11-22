@@ -43,7 +43,8 @@ def fixture_app(port):
     feed = Feed()
     app.state.settings = SimpleNamespace(tenant_id=TENANT, origin=f"http://127.0.0.1:{port}")
     app.state.verify_session = lambda token: Actor(
-        TENANT, USER, frozenset({OPERATOR, APPROVER}), display_name="Fixture") if token == "fixture" else None
+        TENANT, USER, frozenset({OPERATOR, APPROVER}), display_name="Fixture Operator",
+        username="fixture.op@example.test") if token == "fixture" else None
     app.state.changes = feed
     app.state.stream_timing = (0.2, 300.0)
 
@@ -60,6 +61,8 @@ def fixture_app(port):
         data = copy.deepcopy(state["snapshot"])
         if run_id is not None and data.get("run"):
             data["run"]["id"] = run_id
+            data["run"]["display_title"] = next((row.get("display_title") for row in data.get("runs", [])
+                                                 if row["id"] == run_id), None)
         return data
 
     app.state.reader = SimpleNamespace(snapshot=snapshot)

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 from contextlib import asynccontextmanager
 from html import escape
 from pathlib import Path
@@ -14,7 +15,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from pydantic import BaseModel, ConfigDict
 from starlette.concurrency import run_in_threadpool
 
-from .auth import Denied, EntraSession, actor_from_principal, verify_write_origin
+from .auth import APPROVER, OPERATOR, Denied, EntraSession, actor_from_principal, verify_write_origin
 from .changes import ChangeFeed
 from .config import Settings, positive
 from .evidence import Evidence
@@ -26,6 +27,7 @@ from .store import Conflict, Inbox, OperationsTable, table_clients
 
 STATIC = Path(__file__).with_name("static")
 INDEX = (STATIC / "index.html").read_text(encoding="utf-8")
+SHORT_ROLES = {OPERATOR: "Operator", APPROVER: "Approver"}
 SWITCH_ACCOUNT = "/.auth/logout?" + urlencode({
     "post_logout_redirect_uri": "/.auth/login/aad?" + urlencode({
         "post_login_redirect_uri": "/", "prompt": "select_account",
@@ -131,10 +133,16 @@ def create_app():
     @app.get("/")
     def index(request: Request):
         user = actor(request)
-        roles = "".join(f'<span class="account-role">{escape(role)}</span>' for role in sorted(user.roles))
-        page = INDEX.replace("{{switch_account}}", escape(SWITCH_ACCOUNT), 1)
-        page = page.replace("{{account_roles}}", roles, 1)
-        return HTMLResponse(page.replace("{{account_name}}", escape(user.display_name or "이름 없는 계정"), 1))
+        roles = [SHORT_ROLES.get(role, role) for role in sorted(user.roles)]
+        name = user.display_name or "이름 없는 계정"
+        alias = user.username.split("@", 1)[0] or (user.display_name.split() or ["계정"])[0]
+        values = {
+            "switch_account": escape(SWITCH_ACCOUNT), "account_name": escape(name), "account_alias": escape(alias),
+            "account_username": escape(user.username), "account_role_text": escape(", ".join(roles)),
+            "account_roles": "".join(f'<span class="account-role">{escape(role)}</span>' for role in roles),
+        }
+        # One pass, so that values taken from the session are never scanned for further placeholders.
+        return HTMLResponse(re.sub(r"\{\{(\w+)\}\}", lambda match: values[match.group(1)], INDEX))
 
     @app.get("/assets/{name}")
     def asset(request: Request, name: Literal["dashboard.css", "dashboard.js"]):

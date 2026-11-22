@@ -2,10 +2,11 @@
 
 Usage (system Python with Playwright; the fixture server runs under the dashboard venv):
   python dashboard/tests/ui_smoke.py --server-python <dashboard venv python> [--headed]
-Covers: approval inbox across regions + tab-title badge + notifications, health/step/traffic-stage badges,
-per-source freshness, stream update, active-release polling with the stream open, idle slow poll, inbox
-truncation note, polling fallback, Live/Pause/refresh, deep link + back button,
-incremental render preserving open sections, scroll and the release picker, resource tree, events timeline,
+Covers: layout B (top bar with icon buttons, identity pill menu, sidebar release list, release name heading, ARIA tabs
+with the inbox count badge and URL tab), approval inbox across regions + tab-title badge + notifications,
+health/step/traffic-stage badges, per-source freshness, stream update, active-release polling with the stream open,
+idle slow poll, inbox truncation note, polling fallback, Live/Pause/refresh, deep link + back button,
+incremental render preserving open sections, scroll and the release list, resource tree, events timeline,
 release history with per-entry actions, typed-region confirmation, keyboard shortcuts, dark theme, mobile width.
 The fixture server logs one ConnectionAbortedError traceback when the smoke deliberately breaks the stream.
 """
@@ -57,9 +58,9 @@ def region(job, weight, step=None, started=None, revisions=()):
             "revisions": list(revisions)}
 
 
-def history_entry(run_id, status, conclusion, started, profile, commit, requester, reason):
+def history_entry(run_id, status, conclusion, started, profile, commit, requester, reason, title=None):
     return {"id": run_id, "status": status, "conclusion": conclusion, "head_sha": commit, "url": None,
-            "started_at": iso(started), "profile": profile, "commit": commit, "requester": requester,
+            "display_title": title, "started_at": iso(started), "profile": profile, "commit": commit, "requester": requester,
             "duration_seconds": 300 if status != "completed" else 1500, "actions": {"rollback": reason, "retire": reason}}
 
 
@@ -77,12 +78,15 @@ def source(age, state="fresh", **extra):
     return {"observed_at": iso(age), "age_seconds": age, "state": state, **extra}
 
 
+TITLES = {501: "Release 2026.11.22 · checkout latency fix", 480: "Release 2026.11.20 · pricing API"}
+
+
 def snapshot(**changes):
     data = {
         "run": {"id": 501, "status": "in_progress", "conclusion": None, "head_sha": "abcdef1234", "url": None,
-                "profile": "demo", "run_attempt": 1},
-        "runs": [{"id": 501, "status": "in_progress", "conclusion": None},
-                 {"id": 480, "status": "completed", "conclusion": "success"}],
+                "profile": "demo", "run_attempt": 1, "display_title": TITLES[501]},
+        "runs": [{"id": 501, "status": "in_progress", "conclusion": None, "display_title": TITLES[501]},
+                 {"id": 480, "status": "completed", "conclusion": "success", "display_title": TITLES[480]}],
         "build": "success",
         "regions": {
             "kr": region("success", 100),
@@ -92,9 +96,9 @@ def snapshot(**changes):
             "usw": region("waiting", 0),
         },
         "history": [history_entry(501, "in_progress", None, 300, "demo", "abcdef1234", "Kim Operator",
-                                  "A protected workflow is still active"),
+                                  "A protected workflow is still active", TITLES[501]),
                     history_entry(480, "completed", "success", 7200, "production", "1234567abc", None,
-                                  "Select this release to verify its recovery evidence")],
+                                  "Select this release to verify its recovery evidence", TITLES[480])],
         "timeline": [event(400, "deploy", status="accepted", actor="u1", actor_name="Kim Operator"),
                      event(350, "job_completed", name="build / build", status="success"),
                      event(200, "approval_requested", environment="prod-kr", region="kr"),
@@ -149,7 +153,8 @@ def check(name):
 
 def run(fixture, headed, screenshot=None):
     fx = fixture
-    fx.call("PUT", "/__fixture/snapshot", snapshot())
+    base = snapshot()
+    fx.call("PUT", "/__fixture/snapshot", base)
     with sync_playwright() as play:
         browser = play.chromium.launch(channel="msedge", headless=not headed)
         context = browser.new_context(viewport={"width": 1100, "height": 650}, base_url=fx.origin,
@@ -167,12 +172,58 @@ def run(fixture, headed, screenshot=None):
         violations = []
         page.on("console", lambda m: violations.append(m.text) if "Content Security Policy" in m.text else None)
         page.on("pageerror", lambda e: violations.append(str(e)))
+        def tab(name):
+            page.locator(f"#tab-{name}").click()
+            expect(page.locator(f"#tab-{name}")).to_have_attribute("aria-selected", "true")
+            expect(page.locator(f"#panel-{name}")).to_be_visible()
+
+        releases = page.locator("#releases > li")
         try:
-            page.goto("/?run=501&region=sea")
+            page.goto("/?run=501&region=sea&tab=inbox")
             expect(page.locator("[data-region=sea]")).to_have_attribute("aria-pressed", "true")
-            expect(page.locator("#release")).to_have_value("501")
+            expect(page.locator("#releases li[data-key='501'] button")).to_have_attribute("aria-current", "true")
+            expect(page.locator("#tab-inbox")).to_have_attribute("aria-selected", "true")
+            expect(page.locator("#panel-inbox")).to_be_visible()
+            expect(page.locator("#panel-overview")).to_be_hidden()
             assert {"run_id": 501, "region": "sea"} in fx.call("GET", "/__fixture/requests")
-            check("deep link selects release and region")
+            check("deep link selects release, region and tab")
+
+            expect(page.locator("#release-title")).to_have_text("Release 2026.11.22 · checkout latency fix")
+            expect(page.locator("#meta")).to_have_text("#501 · main · demo · abcdef1 · 실행 중")
+            expect(releases).to_have_count(2)
+            first = page.locator("#releases li[data-key='501'] button")
+            for fragment in ("#501", "실행 중", "checkout latency fix", "demo", "abcdef1", "5분 전", "요청자 Kim Operator"):
+                expect(first).to_contain_text(fragment)
+            expect(first.locator(".dot")).to_have_count(1)
+            expect(page.locator("#releases li[data-key='480'] button")).not_to_have_attribute("aria-current", "true")
+            expect(page.locator("#releases li[data-key='480']")).to_contain_text("요청자 미확인")
+            check("heading shows the release name; sidebar lists releases with status, name, profile, commit, time, requester")
+
+            expect(page).to_have_title("(1) Deployment Dashboard")
+            expect(page.locator(".topbar")).to_contain_text("Deployment Dashboard")
+            for name in ("실시간 갱신", "새로고침", "승인 요청 알림"):
+                button = page.get_by_role("button", name=name, exact=True)
+                expect(button).to_have_count(1)
+                expect(button.locator("svg")).to_have_count(1)
+                assert button.get_attribute("title"), name
+                assert not button.inner_text().strip(), f"{name} shows text instead of an icon"
+            expect(page.locator("#deploy svg")).to_have_count(1)
+            pill = page.locator("#account summary")
+            expect(pill.locator("#account-alias")).to_have_text("fixture.op")
+            expect(pill.locator(".account-role")).to_have_text(["Approver", "Operator"])
+            menu = page.locator("#account .who-menu")
+            expect(menu).to_be_hidden()
+            pill.click()
+            expect(menu).to_be_visible()
+            expect(menu.locator("#account-name")).to_have_text("Fixture Operator")
+            expect(menu.get_by_role("link", name="계정 전환")).to_be_visible()
+            expect(menu.get_by_role("link", name="Sign out")).to_have_attribute("href", "/.auth/logout")
+            page.keyboard.press("Escape")
+            expect(menu).to_be_hidden()
+            pill.click()
+            page.locator("#release-title").click()
+            expect(menu).to_be_hidden()
+            check("top bar title, icon buttons with accessible names and tooltips, identity pill menu")
 
             items = page.locator("#inbox-list > li")
             expect(items).to_have_count(2)
@@ -182,9 +233,31 @@ def run(fixture, headed, screenshot=None):
             expect(mine).to_contain_text("다른 승인자")
             expect(mine.get_by_role("button", name="승인", exact=True)).to_be_disabled()
             expect(items.filter(has_text="prod-usw").get_by_role("button", name="승인", exact=True)).to_be_enabled()
-            expect(page).to_have_title("(1) 배포 관제실")
+            expect(page.locator("#inbox-count")).to_have_text("2")
+            expect(page.locator("#tab-inbox")).to_have_attribute("data-attention", "")
             expect(page.locator("#inbox-truncated")).to_be_visible()
-            check("inbox across regions, requester explanation, title badge, truncation note")
+            check("inbox across regions, requester explanation, title + tab badges, truncation note")
+
+            tabs = page.get_by_role("tab")
+            expect(tabs).to_have_text(["개요", "승인 대기 2", "타임라인", "운영 이력", "릴리스 이력"])
+            page.locator("#tab-inbox").focus()
+            page.keyboard.press("ArrowRight")
+            expect(page.locator("#tab-timeline")).to_be_focused()
+            expect(page.locator("#tab-timeline")).to_have_attribute("aria-selected", "true")
+            expect(page.locator("#panel-timeline")).to_be_visible()
+            expect(page.locator("#panel-inbox")).to_be_hidden()
+            page.keyboard.press("End")
+            expect(page.locator("#tab-history")).to_be_focused()
+            page.keyboard.press("ArrowRight")
+            expect(page.locator("#tab-overview")).to_be_focused()
+            expect(page.locator("#tab-overview")).to_have_attribute("tabindex", "0")
+            expect(page.locator("#tab-inbox")).to_have_attribute("tabindex", "-1")
+            expect(page).to_have_url(f"{fx.origin}/?run=501&region=sea")
+            page.keyboard.press("ArrowLeft")
+            expect(page).to_have_url(f"{fx.origin}/?run=501&region=sea&tab=history")
+            page.keyboard.press("Home")
+            expect(page.locator("#panel-overview")).to_be_visible()
+            check("ARIA tabs with arrow/Home/End keys; the tab is kept in the URL")
 
             for key, health in (("kr", "healthy"), ("sea", "progressing"), ("usw", "waiting")):
                 badge = page.locator(f"[data-region={key}] .badge")
@@ -195,6 +268,7 @@ def run(fixture, headed, screenshot=None):
             expect(page.locator("[data-region=sea] .stages [data-reached]")).to_have_count(3)
             check("health badges, current step + elapsed, traffic stage")
 
+            tab("audit")
             expect(page.locator("#freshness [data-source=github]")).to_contain_text("초 전")
             expect(page.locator("#freshness [data-source='runtime:app--r5']")).to_have_attribute("data-state", "stale")
             first = page.locator("#freshness [data-source=audit]").inner_text()
@@ -202,6 +276,7 @@ def run(fixture, headed, screenshot=None):
             assert page.locator("#freshness [data-source=audit]").inner_text() != first, "freshness does not tick"
             check("per-source freshness ticks and warns when stale")
 
+            tab("overview")
             tree = page.locator("#tree")
             expect(tree.locator("[data-node=app]")).to_contain_text("app")
             expect(tree.locator("[data-node=revision]")).to_have_count(5)
@@ -215,6 +290,7 @@ def run(fixture, headed, screenshot=None):
             expect(r5).to_have_attribute("data-health", "healthy")
             check("resource tree app > revision > replica > container; Azure-listed vs HTTP-observed")
 
+            tab("timeline")
             events = page.locator("#timeline > li")
             expect(events).to_have_count(4)
             expect(events.first).to_contain_text("새 배포")
@@ -224,11 +300,12 @@ def run(fixture, headed, screenshot=None):
             expect(events.last).to_have_attribute("data-kind", "approve")
             check("events timeline in time order with display names")
 
+            tab("history")
             entries = page.locator("#history > li")
             expect(entries).to_have_count(2)
             current = page.locator("#history > li[data-key='501']")
             expect(current).to_have_attribute("aria-current", "true")
-            for fragment in ("Kim Operator", "demo", "abcdef1", "5분"):
+            for fragment in ("Kim Operator", "demo", "abcdef1", "5분", "checkout latency fix"):
                 expect(current).to_contain_text(fragment)
             past = page.locator("#history > li[data-key='480']")
             for fragment in ("production", "1234567", "25분", "릴리스를 선택"):
@@ -236,7 +313,15 @@ def run(fixture, headed, screenshot=None):
             expect(past.get_by_role("button", name="롤백 요청")).to_be_disabled()
             check("release history with start, profile, commit, requester, duration and disabled reasons")
             if screenshot:
-                page.screenshot(path=screenshot, full_page=True)
+                tab("overview")
+                page.set_viewport_size({"width": 1440, "height": 900})
+                page.mouse.move(0, 0)
+                page.screenshot(path=f"{screenshot}-default.png")
+                tab("inbox")
+                page.mouse.move(0, 0)
+                page.screenshot(path=f"{screenshot}-inbox.png")
+                page.set_viewport_size({"width": 1100, "height": 650})
+            tab("overview")
 
             expect(page.locator("#connection")).to_have_attribute("data-mode", "stream")
             page.locator("#notify").click()
@@ -244,19 +329,20 @@ def run(fixture, headed, screenshot=None):
             details = page.locator("#regional article details").first
             details.locator("summary").click()
             page.evaluate("""() => { window.__article = document.querySelector('#regional article');
-                                     window.__option = document.querySelector('#release option[value="480"]');
+                                     window.__release = document.querySelector('#releases li[data-key="480"]');
                                      window.scrollTo(0, 300); }""")
             scroll = page.evaluate("window.scrollY")
             assert scroll > 0, "page is not scrollable"
-            update = snapshot()
+            update = snapshot(history=base["history"])
             update["regions"]["kr"]["job"] = "failure"
             update["inbox"].append(gate("op-sea-new", 777, "sea"))
             fx.call("PUT", "/__fixture/snapshot", update)
             fx.call("POST", "/__fixture/change", {"run_id": 501})
             expect(page.locator("[data-region=kr] .badge")).to_have_attribute("data-health", "degraded", timeout=4000)
-            expect(page).to_have_title("(2) 배포 관제실")
+            expect(page).to_have_title("(2) Deployment Dashboard")
+            expect(page.locator("#inbox-count")).to_have_text("3")
             assert page.evaluate("window.__article === document.querySelector('#regional article')"), "article re-created"
-            assert page.evaluate("window.__option === document.querySelector('#release option[value=\"480\"]')"), "picker rebuilt"
+            assert page.evaluate("window.__release === document.querySelector('#releases li[data-key=\"480\"]')"), "release list rebuilt"
             expect(details).to_have_js_property("open", True)
             assert page.evaluate("window.scrollY") == scroll, "scroll reset"
             page.wait_for_function("window.__notes.length === 1")
@@ -272,8 +358,11 @@ def run(fixture, headed, screenshot=None):
                             inbox_truncated=False, regions={k: region("success", 100) for k in ("kr", "sea", "usw")})
             fx.call("PUT", "/__fixture/snapshot", idle)
             fx.call("POST", "/__fixture/change", {"run_id": 501})
+            tab("inbox")
             expect(page.locator("#inbox-empty")).to_be_visible(timeout=4000)
             expect(page.locator("#inbox-truncated")).to_be_hidden()
+            expect(page.locator("#inbox-count")).to_be_empty()
+            expect(page.locator("#tab-inbox")).not_to_have_attribute("data-attention", "")
             page.wait_for_timeout(500)
             count = len(fx.call("GET", "/__fixture/requests"))
             page.wait_for_timeout(7000)
@@ -308,21 +397,29 @@ def run(fixture, headed, screenshot=None):
             items.filter(has_text="prod-usw").get_by_role("button", name="승인", exact=True).click()
             page.locator("dialog#confirm").get_by_role("button", name="확인", exact=True).click()
             expect(items.filter(has_text="prod-usw")).to_have_count(0)
-            expect(page).to_have_title("(1) 배포 관제실")
+            expect(page).to_have_title("(1) Deployment Dashboard")
             check("approved request leaves the inbox immediately")
 
+            tab("overview")
             page.locator("[data-region=kr]").click()
             expect(page).to_have_url(f"{fx.origin}/?run=501&region=kr")
-            page.locator("#release").select_option("480")
+            page.locator("#releases li[data-key='480'] button").click()
             expect(page).to_have_url(f"{fx.origin}/?run=480&region=kr")
+            expect(page.locator("#releases li[data-key='480'] button")).to_have_attribute("aria-current", "true")
+            expect(page.locator("#release-title")).to_have_text("Release 2026.11.20 · pricing API")
             page.go_back()
             expect(page).to_have_url(f"{fx.origin}/?run=501&region=kr")
-            expect(page.locator("#release")).to_have_value("501")
+            expect(page.locator("#releases li[data-key='501'] button")).to_have_attribute("aria-current", "true")
             page.go_back()
             expect(page.locator("[data-region=sea]")).to_have_attribute("aria-pressed", "true")
             page.wait_for_timeout(500)
             assert fx.call("GET", "/__fixture/requests")[-1] == {"run_id": 501, "region": "sea"}
-            check("URL tracks release/region; back button restores them")
+            page.locator("#releases li[data-key='480'] button").focus()
+            page.keyboard.press("Enter")
+            expect(page).to_have_url(f"{fx.origin}/?run=480&region=sea")
+            page.go_back()
+            expect(page).to_have_url(f"{fx.origin}/?run=501&region=sea")
+            check("sidebar selects releases by click or keyboard; URL tracks release/region; back button restores them")
 
             recovery = snapshot(run={"id": 480, "status": "completed", "conclusion": "success", "head_sha": "1234567abc",
                                      "url": None, "profile": "production", "run_attempt": 1}, inbox=[],
@@ -333,11 +430,12 @@ def run(fixture, headed, screenshot=None):
             recovery["history"][0]["actions"] = {"rollback": select, "retire": select}
             recovery["history"][1]["actions"] = {"rollback": None, "retire": recovery["actions"]["retire"]}
             fx.call("PUT", "/__fixture/snapshot", recovery)
+            tab("history")
             past.get_by_role("button", name="선택").click()
-            expect(page).to_have_url(f"{fx.origin}/?run=480&region=sea")
+            expect(page).to_have_url(f"{fx.origin}/?run=480&region=sea&tab=history")
             page.evaluate("document.activeElement.blur()")
             page.keyboard.press("1")
-            expect(page).to_have_url(f"{fx.origin}/?run=480&region=kr")
+            expect(page).to_have_url(f"{fx.origin}/?run=480&region=kr&tab=history")
             expect(page.locator("[data-region=kr]")).to_have_attribute("aria-pressed", "true")
             count = len(fx.call("GET", "/__fixture/requests"))
             page.keyboard.press("r")
@@ -363,7 +461,7 @@ def run(fixture, headed, screenshot=None):
             typed.fill("")
             typed.press_sequentially("kr")
             expect(apply).to_be_enabled()
-            expect(page).to_have_url(f"{fx.origin}/?run=480&region=kr")
+            expect(page).to_have_url(f"{fx.origin}/?run=480&region=kr&tab=history")
             apply.click()
             page.wait_for_function("fetch('/__fixture/writes').then(r => r.json()).then(w => w.length > 0)")
             assert fx.call("GET", "/__fixture/writes") == [{"action": "rollback", "source_run_id": 480, "region": "kr"}]
@@ -378,16 +476,22 @@ def run(fixture, headed, screenshot=None):
             assert luminance("body") < 60 and luminance(".panel") < 60, "dark theme does not follow the OS setting"
             assert page.evaluate("(([r, g, b]) => (r + g + b) / 3)(getComputedStyle(document.body).color.match(/[0-9.]+/g).map(Number))") > 180
             if screenshot:
-                page.screenshot(path=screenshot.replace(".png", "-dark.png"), full_page=True)
+                page.screenshot(path=f"{screenshot}-dark.png", full_page=True)
             page.emulate_media(color_scheme="light")
             check("prefers-color-scheme dark theme")
 
             page.set_viewport_size({"width": 375, "height": 740})
             page.wait_for_timeout(300)
             assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), "horizontal overflow on mobile"
-            for selector in ("#history", "#timeline", "#tree", "#inbox"):
+            sidebar, content = page.locator(".sidebar").bounding_box(), page.locator(".content").bounding_box()
+            assert sidebar["y"] + sidebar["height"] <= content["y"] + 1, "sidebar does not collapse above the content"
+            expect(page.locator("#deploy")).to_be_visible()
+            expect(page.locator("#account summary")).to_be_visible()
+            for name, selector in (("history", "#history"), ("timeline", "#timeline"), ("overview", "#tree"), ("inbox", "#inbox")):
+                tab(name)
                 expect(page.locator(selector)).to_be_visible()
-            check("mobile width without horizontal overflow")
+                assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), f"overflow on {name}"
+            check("mobile width: sidebar above content, every tab without horizontal overflow")
             assert not violations, violations
             check("no CSP violations or page errors")
         finally:
@@ -398,7 +502,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--server-python", default=sys.executable)
     parser.add_argument("--headed", action="store_true")
-    parser.add_argument("--screenshot", help="save a full-page screenshot after the first checks")
+    parser.add_argument("--screenshot", help="path prefix: saves <prefix>-default.png and <prefix>-inbox.png "
+                                             "(1440x900, light) and <prefix>-dark.png")
     args = parser.parse_args()
     fixture = Fixture(args.server_python)
     try:

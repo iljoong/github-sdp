@@ -73,7 +73,8 @@ class DashboardHTTPTests(unittest.TestCase):
         page = self.client.get("/?run=34&region=sea", headers=self.headers)
         self.assertEqual(page.status_code, 200)
         ids = set(re.findall(r'\sid="([^"]+)"', page.text))
-        self.assertLessEqual({"inbox", "live", "refresh", "notify", "freshness", "connection", "regional", "release"}, ids)
+        self.assertLessEqual({"inbox", "live", "refresh", "notify", "freshness", "connection", "regional", "releases",
+                              "deploy", "tab-inbox", "inbox-count"}, ids)
         self.assertEqual(self.client.get("/?run=34&region=sea").status_code, 403)
 
     def test_writes_need_origin_and_reject_extra_targets(self):
@@ -83,23 +84,37 @@ class DashboardHTTPTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/operations", json=command, headers=headers).status_code, 200)
         self.assertEqual(self.client.post("/api/operations", json={**command,"repo":"other/repo"}, headers=headers).status_code, 422)
 
+    def banner(self, response):
+        header = re.search(r"<header\b.*?</header>", response.text, re.S).group(0)
+        return ElementTree.fromstring(header)
+
     def test_banner_uses_verified_account_name_and_all_dashboard_roles(self):
         headers = {**self.headers, "x-ms-client-principal": principal(OPERATOR, APPROVER)}
         self.client.app.state.verify_session = lambda _: SimpleNamespace()
         self.assertEqual(self.client.get("/", headers=headers).status_code, 403)
         self.client.app.state.verify_session = lambda _: Actor(
-            TENANT, USER, frozenset({OPERATOR, APPROVER}), display_name="Test <Admin>")
+            TENANT, USER, frozenset({OPERATOR, APPROVER}), display_name="Test <Admin>", username="t<o>m&\"x@example.test")
         response = self.client.get("/", headers=headers)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["cache-control"], "no-store")
-        banner = ElementTree.fromstring("<header>" + response.text.split("<header>", 1)[1].split("</header>", 1)[0] + "</header>")
+        banner = self.banner(response)
         self.assertEqual(banner.find(".//*[@id='account-name']").text, "Test <Admin>")
-        self.assertCountEqual([item.text for item in banner.findall(".//span[@class='account-role']")],
-                              [OPERATOR, APPROVER])
+        self.assertEqual(banner.find(".//*[@id='account-alias']").text, 't<o>m&"x')
+        self.assertIn("Test <Admin>", banner.find(".//summary").attrib["aria-label"])
+        self.assertEqual([item.text for item in banner.findall(".//span[@class='account-role']")],
+                         ["Approver", "Operator"])
+        self.assertNotIn("<Admin>", response.text)
+
+    def test_alias_falls_back_to_the_first_word_of_the_display_name(self):
+        self.client.app.state.verify_session = lambda _: Actor(
+            TENANT, USER, frozenset({OPERATOR}), display_name="Kim Operator")
+        self.assertEqual(self.banner(self.client.get("/", headers=self.headers)).find(".//*[@id='account-alias']").text,
+                         "Kim")
 
     def test_switch_account_returns_from_easy_auth_logout_to_entra_account_selection(self):
         response = self.client.get("/", headers=self.headers)
-        banner = ElementTree.fromstring("<header>" + response.text.split("<header>", 1)[1].split("</header>", 1)[0] + "</header>")
+        banner = self.banner(response)
+        self.assertEqual(banner.find(".//*[@id='sign-out']").attrib["href"], "/.auth/logout")
         switch = urlsplit(banner.find(".//*[@id='switch-account']").attrib["href"])
         self.assertEqual((switch.scheme, switch.netloc, switch.path), ("", "", "/.auth/logout"))
         login = urlsplit(parse_qs(switch.query)["post_logout_redirect_uri"][0])

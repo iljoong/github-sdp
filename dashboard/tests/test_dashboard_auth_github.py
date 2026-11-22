@@ -29,6 +29,7 @@ class AuthTests(unittest.TestCase):
     def test_require_the_tenant_a_user_and_an_assigned_role(self):
         actor = actor_from_principal(principal("ReleaseApprover"), TENANT)
         self.assertEqual(actor.object_id, USER)
+        self.assertEqual(actor.username, "operator@example.test")
         authorize(actor, "ReleaseApprover")
         for header in (None, principal(), principal("ReleaseOperator", kind="app"),
                        principal("ReleaseOperator", tenant=USER)):
@@ -57,6 +58,10 @@ class AuthTests(unittest.TestCase):
                          "operator@example.test")
         named = jwt.encode({**claims, "name": "Test Operator"}, private_key, algorithm="RS256")
         self.assertEqual(verifier(named).display_name, "Test Operator")
+        self.assertEqual(verifier(named).username, "operator@example.test")
+        upn_only = {k: v for k, v in claims.items() if k != "preferred_username"}
+        self.assertEqual(verifier(jwt.encode({**upn_only, "upn": "upn@example.test"}, private_key,
+                                             algorithm="RS256")).username, "upn@example.test")
         for override in ({"aud": "other-client"}, {"tid": USER}, {"exp": now - 60}):
             with self.assertRaises(Denied):
                 verifier(jwt.encode({**claims, **override}, private_key, algorithm="RS256"))

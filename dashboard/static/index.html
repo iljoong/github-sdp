@@ -3,78 +3,97 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>배포 관제실</title>
+  <title>Deployment Dashboard</title>
   <link rel="stylesheet" href="/assets/dashboard.css">
   <script defer src="/assets/dashboard.js"></script>
 </head>
 <body>
-  <header>
-    <div class="wrap mast">
-      <strong>배포 관제실</strong>
-      <div class="account">
-        <div class="account-identity" aria-label="현재 계정">
-          <bdi id="account-name">{{account_name}}</bdi>
-          <span class="account-roles" aria-label="관제실 역할">{{account_roles}}</span>
-        </div>
-        <nav class="account-links" aria-label="계정 작업">
-          <a id="switch-account" href="{{switch_account}}">계정 전환</a>
-          <a href="/.auth/logout">로그아웃</a>
-        </nav>
-      </div>
-    </div>
-  </header>
-  <main class="wrap">
-    <div class="intro">
-      <div><h1>safeaca 운영 배포</h1><p>Build → KR → SEA → USW</p></div>
-      <div class="actions">
-        <label for="release">릴리스</label><select id="release"><option value="">현재 실행</option></select>
-        <button id="deploy" class="primary" disabled>새 배포</button>
-      </div>
-    </div>
-    <div class="toolbar" role="group" aria-label="갱신 제어">
-      <button type="button" id="live" aria-pressed="true">실시간 갱신</button>
-      <button type="button" id="refresh">새로고침</button>
-      <button type="button" id="notify" aria-pressed="false">승인 요청 알림</button>
+  <header class="topbar">
+    <a class="brand" href="/" title="현재 실행으로 이동"><span class="logo" data-icon="logo" aria-hidden="true"></span><strong>Deployment Dashboard</strong></a>
+    <div class="tools" role="group" aria-label="갱신 제어">
       <span id="connection" data-mode="starting">연결 중</span>
-      <small id="shortcuts">단축키: 1·2·3 지역 · R 새로고침 · L 실시간/일시정지</small>
+      <button type="button" class="icon" id="live" aria-pressed="true" aria-label="실시간 갱신" title="실시간 갱신 (L)" data-icon="live"></button>
+      <button type="button" class="icon" id="refresh" aria-label="새로고침" title="새로고침 (R)" data-icon="refresh"></button>
+      <button type="button" class="icon" id="notify" aria-pressed="false" aria-label="승인 요청 알림" title="승인 요청 알림" data-icon="bell"></button>
     </div>
-    <p id="message" role="status">배포 정보를 불러오는 중입니다.</p>
-    <ul id="freshness" class="freshness" aria-label="출처별 관찰 시각"></ul>
-    <section id="inbox" class="panel" aria-labelledby="inbox-title">
-      <h2 id="inbox-title">승인 대기</h2>
-      <p id="inbox-empty">모든 지역에 대기 중인 승인 요청이 없습니다.</p>
-      <ol id="inbox-list"></ol>
-      <p id="inbox-truncated" hidden>진행 중인 실행이 많아 일부 실행의 승인 요청만 표시합니다. GitHub Actions에서 나머지를 확인하세요.</p>
-    </section>
-    <section class="panel" aria-labelledby="release-title">
-      <div class="spread"><div><h2 id="release-title">릴리스</h2><p id="meta"></p></div><a id="github" hidden>GitHub 실행 보기</a></div>
+    <details class="who" id="account">
+      <summary aria-label="계정 메뉴: {{account_name}} ({{account_role_text}})"><bdi id="account-alias">{{account_alias}}</bdi><span class="account-roles">{{account_roles}}</span></summary>
+      <div class="who-menu">
+        <bdi id="account-name">{{account_name}}</bdi>
+        <small id="account-username">{{account_username}}</small>
+        <a id="switch-account" href="{{switch_account}}">계정 전환</a>
+        <a id="sign-out" href="/.auth/logout"><span data-icon="signout" aria-hidden="true"></span>Sign out</a>
+      </div>
+    </details>
+  </header>
+  <div class="shell">
+    <aside class="sidebar" aria-label="릴리스">
+      <button type="button" id="deploy" class="primary" disabled><span data-icon="plus" aria-hidden="true"></span>새 배포</button>
+      <h2 id="releases-title">Releases</h2>
+      <ol id="releases" aria-labelledby="releases-title"></ol>
+      <small id="shortcuts">단축키: 1·2·3 지역 · R 새로고침 · L 실시간/일시정지</small>
+    </aside>
+    <main class="content">
+      <div class="release-head">
+        <div>
+          <h1 id="release-title">릴리스</h1>
+          <p id="meta"></p>
+        </div>
+        <a id="github" class="icon-link" hidden aria-label="GitHub 실행 보기" title="GitHub 실행 보기" data-icon="github"></a>
+      </div>
+      <p id="message" role="status">배포 정보를 불러오는 중입니다.</p>
       <nav class="rail" aria-label="배포 단계">
         <div class="station" id="build"><strong>Build</strong><span class="badge" data-health="unknown">? 미확인</span><span class="status">미확인</span></div>
         <button type="button" class="station" data-region="kr" aria-pressed="true"><strong>KR / 한국 중부</strong><span class="badge" data-health="unknown">? 미확인</span><span class="status">미확인</span><small class="weight"></small><small class="step"></small><span class="stages" aria-label="트래픽 단계 미확인"><span data-stage="0">0</span><span data-stage="10">10</span><span data-stage="50">50</span><span data-stage="100">100%</span></span></button>
         <button type="button" class="station" data-region="sea" aria-pressed="false"><strong>SEA / 동남아시아</strong><span class="badge" data-health="unknown">? 미확인</span><span class="status">미확인</span><small class="weight"></small><small class="step"></small><span class="stages" aria-label="트래픽 단계 미확인"><span data-stage="0">0</span><span data-stage="10">10</span><span data-stage="50">50</span><span data-stage="100">100%</span></span></button>
         <button type="button" class="station" data-region="usw" aria-pressed="false"><strong>USW / 미국 서부</strong><span class="badge" data-health="unknown">? 미확인</span><span class="status">미확인</span><small class="weight"></small><small class="step"></small><span class="stages" aria-label="트래픽 단계 미확인"><span data-stage="0">0</span><span data-stage="10">10</span><span data-stage="50">50</span><span data-stage="100">100%</span></span></button>
       </nav>
-    </section>
-    <div class="layout">
-      <section id="regional" class="panel" aria-label="지역 상세"></section>
-      <aside class="panel">
-        <h2>지역 작업</h2>
-        <div id="operations"></div>
-        <h2>최근 운영 이력</h2>
-        <ol id="audit"></ol>
-      </aside>
-    </div>
-    <div class="layout">
-      <section class="panel" aria-labelledby="history-title">
-        <h2 id="history-title">릴리스 이력</h2>
-        <ol id="history"></ol>
-      </section>
-      <section class="panel" aria-labelledby="timeline-title">
-        <h2 id="timeline-title">이벤트 타임라인</h2>
-        <ol id="timeline"></ol>
-      </section>
-    </div>
-  </main>
+      <div class="tabs" role="tablist" aria-label="릴리스 정보">
+        <button type="button" role="tab" id="tab-overview" data-tab="overview" aria-controls="panel-overview" aria-selected="true">개요</button>
+        <button type="button" role="tab" id="tab-inbox" data-tab="inbox" aria-controls="panel-inbox" aria-selected="false" tabindex="-1">승인 대기 <span class="count" id="inbox-count"></span></button>
+        <button type="button" role="tab" id="tab-timeline" data-tab="timeline" aria-controls="panel-timeline" aria-selected="false" tabindex="-1">타임라인</button>
+        <button type="button" role="tab" id="tab-audit" data-tab="audit" aria-controls="panel-audit" aria-selected="false" tabindex="-1">운영 이력</button>
+        <button type="button" role="tab" id="tab-history" data-tab="history" aria-controls="panel-history" aria-selected="false" tabindex="-1">릴리스 이력</button>
+      </div>
+      <div role="tabpanel" id="panel-overview" aria-labelledby="tab-overview" tabindex="0" class="layout">
+        <section id="regional" class="panel" aria-label="지역 상세"></section>
+        <section class="panel" aria-labelledby="operations-title">
+          <h2 id="operations-title">지역 작업</h2>
+          <div id="operations"></div>
+        </section>
+      </div>
+      <div role="tabpanel" id="panel-inbox" aria-labelledby="tab-inbox" tabindex="0" hidden>
+        <section id="inbox" class="panel" aria-labelledby="inbox-title">
+          <h2 id="inbox-title">승인 대기</h2>
+          <p id="inbox-empty">모든 지역에 대기 중인 승인 요청이 없습니다.</p>
+          <ol id="inbox-list"></ol>
+          <p id="inbox-truncated" hidden>진행 중인 실행이 많아 일부 실행의 승인 요청만 표시합니다. GitHub Actions에서 나머지를 확인하세요.</p>
+        </section>
+      </div>
+      <div role="tabpanel" id="panel-timeline" aria-labelledby="tab-timeline" tabindex="0" hidden>
+        <section class="panel" aria-labelledby="timeline-title">
+          <h2 id="timeline-title">이벤트 타임라인</h2>
+          <ol id="timeline"></ol>
+        </section>
+      </div>
+      <div role="tabpanel" id="panel-audit" aria-labelledby="tab-audit" tabindex="0" hidden>
+        <section class="panel" aria-labelledby="audit-title">
+          <h2 id="audit-title">최근 운영 이력</h2>
+          <ol id="audit"></ol>
+        </section>
+        <section class="panel" aria-labelledby="freshness-title">
+          <h2 id="freshness-title">출처별 관찰 시각</h2>
+          <ul id="freshness" class="freshness"></ul>
+        </section>
+      </div>
+      <div role="tabpanel" id="panel-history" aria-labelledby="tab-history" tabindex="0" hidden>
+        <section class="panel" aria-labelledby="history-title">
+          <h2 id="history-title">릴리스 이력 · 롤백/종료</h2>
+          <ol id="history"></ol>
+        </section>
+      </div>
+    </main>
+  </div>
   <dialog id="confirm">
     <form method="dialog">
       <h2 id="confirm-title"></h2>

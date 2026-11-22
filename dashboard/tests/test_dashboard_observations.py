@@ -456,6 +456,17 @@ class ReleaseHistoryTests(unittest.TestCase):
              "profile": "production", "commit": "d" * 40, "requester": None, "duration_seconds": 600,
              "url": "https://github.com/owner/repo/actions/runs/6"}])
 
+    def test_releases_are_named_by_their_run_display_title_or_workflow_name(self):
+        console = Console()
+        console.runs[7].update(display_title="Release 2026.11.22 · checkout fix", name="release")
+        console.runs[6] = {**release_run(6, "completed"), "name": "release"}
+        console.runs[5] = release_run(5, "completed")
+        snapshot = console.snapshot(run_id=7)
+        self.assertEqual(snapshot["run"]["display_title"], "Release 2026.11.22 · checkout fix")
+        expected = {7: "Release 2026.11.22 · checkout fix", 6: "release", 5: None}
+        self.assertEqual({row["id"]: row["display_title"] for row in snapshot["runs"]}, expected)
+        self.assertEqual({row["id"]: row["display_title"] for row in snapshot["history"]}, expected)
+
     def test_history_entries_carry_rollback_and_retire_reasons(self):
         console = Console("completed")
         console.runs[6] = release_run(6, "completed")

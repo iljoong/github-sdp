@@ -11,7 +11,7 @@ h1, h2, h3, p { margin: 0 }
 h1 { font-size: clamp(1.7rem, 4vw, 2.4rem); line-height: 1.15; letter-spacing: -.04em }
 h2 { font-size: 1.18rem }
 h3 { font-size: 1rem }
-small, #meta, .intro p, #message, dt { color: var(--muted) }
+small, #meta, #message, dt { color: var(--muted) }
 button, select, input { font: inherit; background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: .5rem .75rem }
 button { font-weight: 650; cursor: pointer }
 button:disabled { background: var(--disabled); color: var(--muted); cursor: not-allowed }
@@ -19,24 +19,74 @@ button:not(:disabled):hover { border-color: var(--blue) }
 .primary:not(:disabled) { background: var(--blue); color: var(--on-blue); border-color: var(--blue) }
 a { color: var(--blue) }
 :focus-visible { outline: 3px solid var(--focus); outline-offset: 3px }
-.wrap { max-width: 1370px; margin: auto; padding: 0 clamp(16px, 4vw, 48px) }
-header { color: white; background: var(--nav) }
-header a { color: #d8e6ff }
-.mast, .intro, .spread, .actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap }
-.mast, .intro, .spread { justify-content: space-between }
-.mast { min-height: 60px; padding-block: 10px }
-.account, .account-identity, .account-roles, .account-links { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; min-width: 0 }
-.account { font-size: .88rem }
+[hidden] { display: none !important }
+svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none }
+.spread, .actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap }
+.spread { justify-content: space-between }
+/* Top bar: brand, connection state, icon buttons, identity pill */
+.topbar { display: flex; align-items: center; gap: 8px; min-height: 52px; padding: 6px 16px; color: white; background: var(--nav);
+          position: sticky; top: 0; z-index: 5 }
+.brand { display: flex; align-items: center; gap: 9px; margin-right: auto; color: inherit; text-decoration: none; font-size: 1.02rem; min-width: 0 }
+.brand strong { white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+.logo { display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: #184aca; color: white; flex: none }
+.tools { display: flex; align-items: center; gap: 4px }
+#connection { font-size: .8rem; color: #b9c8dc; margin-right: 6px; white-space: nowrap }
+#connection::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: #8aa0bb }
+#connection[data-mode=stream]::before { background: #3ddc97 }
+#connection[data-mode=polling]::before { background: #8bb0ff }
+#connection[data-mode=backoff], #connection[data-mode=paused] { color: #f0b45c; font-weight: 650 }
+#connection[data-mode=backoff]::before, #connection[data-mode=paused]::before { background: #f0b45c }
+button.icon { display: inline-grid; place-items: center; width: 34px; height: 34px; padding: 0; border-radius: 8px;
+              background: transparent; color: #d8e6ff; border: 1px solid transparent }
+button.icon:not(:disabled):hover { background: #ffffff1a; border-color: #ffffff33 }
+#live[aria-pressed=true], #notify[aria-pressed=true] { background: #ffffff22; color: white; border-color: #ffffff40 }
+.who { position: relative; margin-left: 4px }
+.who summary { list-style: none; display: flex; align-items: center; gap: 6px; cursor: pointer; border-radius: 999px;
+               padding: 4px 5px 4px 12px; background: #ffffff1a; border: 1px solid #ffffff2e; font-size: .85rem; white-space: nowrap }
+.who summary::-webkit-details-marker { display: none }
+#account-alias { font-weight: 650; max-width: 12rem; overflow: hidden; text-overflow: ellipsis }
+.account-roles { display: flex; gap: 3px }
+.account-role { border-radius: 999px; padding: 1px 8px; background: #184aca; color: white; font-size: .75rem; font-weight: 650 }
+.who-menu { position: absolute; right: 0; top: calc(100% + 8px); min-width: 230px; max-width: calc(100vw - 24px); display: grid; gap: 6px;
+            padding: 14px; background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 10px 30px #0003 }
 #account-name { font-weight: 650; overflow-wrap: anywhere }
-.account-roles { gap: 4px }
-.account-role { border: 1px solid #52647a; border-radius: 4px; padding-inline: 5px; color: #d8e6ff }
-.account-links { white-space: nowrap }
-main.wrap { padding-block: 26px 56px }
-.intro p { margin-top: 6px }
-#message { margin: 12px 0 }
+#account-username { overflow-wrap: anywhere }
+#account-username:empty { display: none }
+.who-menu a { color: var(--blue); text-decoration: none }
+.who-menu a:hover { text-decoration: underline }
+#sign-out { display: flex; align-items: center; gap: 6px; border-top: 1px solid var(--soft); padding-top: 8px; margin-top: 4px }
+/* Shell: release sidebar + main content */
+.shell { display: grid; grid-template-columns: 270px minmax(0, 1fr); min-height: calc(100vh - 52px) }
+.sidebar { border-right: 1px solid var(--line); background: var(--surface); padding: 14px 12px; position: sticky; top: 52px;
+           height: calc(100vh - 52px); overflow-y: auto; display: flex; flex-direction: column }
+#deploy { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100% }
+#releases-title { margin: 18px 4px 6px; font-size: .75rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted) }
+#releases { margin: 0 }
+#releases li { border: 0; padding: 0 }
+.release-item { display: grid; gap: 1px; width: 100%; text-align: left; font-weight: 400; border: 1px solid transparent;
+                border-radius: 8px; padding: 8px 10px; background: transparent; margin-bottom: 4px }
+.release-item:not(:disabled):hover { background: var(--soft); border-color: transparent }
+.release-item[aria-current=true] { background: var(--selected); border-color: var(--blue) }
+.release-top { display: flex; align-items: center; gap: 7px }
+.release-state { margin-left: auto; font-size: .75rem; color: var(--muted) }
+.release-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.release-item small { font-size: .76rem }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none }
+[data-state=success] .dot { background: var(--good) }
+[data-state=failure] .dot, [data-state=cancelled] .dot { background: var(--bad) }
+[data-state=in_progress] .dot, [data-state=queued] .dot { background: var(--progress) }
+[data-state=waiting] .dot, [data-state=pending] .dot { background: var(--warn-line) }
+#shortcuts { margin-top: auto; padding: 12px 4px 0; font-size: .78rem }
+.content { padding: 20px clamp(14px, 2.5vw, 32px) 56px; min-width: 0 }
+.release-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px }
+.release-head h1 { font-size: clamp(1.3rem, 2.4vw, 1.75rem); overflow-wrap: anywhere }
+#meta { margin-top: 4px; font-size: .88rem }
+.icon-link { display: inline-grid; place-items: center; width: 34px; height: 34px; flex: none; border: 1px solid var(--line); border-radius: 8px; background: var(--surface) }
+#message { margin: 8px 0 0; font-size: .85rem }
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 9px; padding: 17px; min-width: 0 }
-.rail { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin-top: 14px }
-.station { border: 1px solid var(--line); border-top: 4px solid var(--rail); border-radius: 6px; padding: 12px; text-align: left; position: relative; min-height: 93px }
+.rail { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 14px }
+.station { border: 1px solid var(--line); border-top: 4px solid var(--rail); border-radius: 6px; padding: 8px 10px; text-align: left; position: relative }
+.station .weight, .station .step { font-size: .78rem }
 .station:not(:last-child)::after { content: ""; position: absolute; top: 50%; left: 100%; width: 17px; border-top: 2px solid var(--rail); pointer-events: none }
 .station > * { display: block }
 .station[aria-pressed=true] { border-color: var(--blue); background: var(--selected) }
@@ -50,21 +100,28 @@ main.wrap { padding-block: 26px 56px }
 .station .stages { display: flex; gap: 3px; margin-top: 6px }
 .stages span { flex: 1; text-align: center; font-size: .72rem; border-radius: 3px; background: var(--soft); color: var(--muted) }
 .stages span[data-reached] { background: var(--blue); color: var(--on-blue) }
-.toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 14px }
-#live[aria-pressed=true], #notify[aria-pressed=true] { border-color: var(--blue); background: var(--selected) }
-#connection { font-size: .88rem; color: var(--muted) }
-#connection[data-mode=backoff], #connection[data-mode=paused] { color: var(--warn); font-weight: 650 }
-.freshness { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; padding: 0; list-style: none }
+/* Tabs below the stage bar; the inbox tab stands out while the user can decide a gate. */
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-top: 18px; overflow-x: auto }
+.tabs [role=tab] { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: .55rem .9rem; color: var(--muted); white-space: nowrap }
+.tabs [role=tab][aria-selected=true] { color: var(--ink); border-bottom-color: var(--blue) }
+.tabs [role=tab]:not(:disabled):hover { border-color: transparent; border-bottom-color: var(--line); color: var(--ink) }
+.tabs [role=tab][aria-selected=true]:hover { border-bottom-color: var(--blue) }
+.count:not(:empty) { margin-left: 2px; border-radius: 999px; padding: 0 7px; background: var(--muted); color: var(--surface); font-size: .75rem }
+#tab-inbox[data-attention] { color: var(--warn); background: var(--warn-bg); border-radius: 6px 6px 0 0 }
+#tab-inbox[data-attention][aria-selected=true] { border-bottom-color: var(--warn-line) }
+#tab-inbox[data-attention] .count { background: var(--warn-line); color: white }
+[role=tabpanel] { margin-top: 14px }
+[role=tabpanel] > .panel + .panel { margin-top: 14px }
+.freshness { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none }
 .freshness li { border: 1px solid var(--line); border-radius: 4px; padding: 1px 7px; font-size: .82rem; background: var(--surface) }
 .freshness li[data-state=stale] { border-color: var(--warn-line); color: var(--warn); background: var(--warn-bg) }
 .freshness li[data-state=unavailable] { border-color: var(--bad); color: var(--bad); background: var(--bad-bg) }
-#inbox { margin-bottom: 15px }
+.layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); align-items: start; gap: 15px }
 #inbox-list { margin: 0 }
 #inbox-list li { border-bottom: 0 }
 #inbox-truncated { color: var(--muted) }
 .request .reason { color: var(--warn) }
 .request .actions .command { margin-bottom: 0 }
-.layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); align-items: start; gap: 15px; margin-top: 15px }
 .panel > * + * { margin-top: 12px }
 .request { border-left: 4px solid var(--warn-line); padding: 10px; background: var(--warn-bg); margin-bottom: 8px }
 .request p, .command small { display: block; margin: 5px 0 }
@@ -110,5 +167,22 @@ dialog footer { justify-content: flex-end }
     --good: #4fd1b5; --progress: #8bb0ff; --focus: #8bb0ff; --on-blue: #0b1220;
   }
   dialog::backdrop { background: #000000a0 }
-}@media (max-width: 800px) { .layout { grid-template-columns: 1fr } }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr }
+  .sidebar { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line) }
+  #releases { display: flex; gap: 6px; overflow-x: auto }
+  .release-item { width: 210px; margin-bottom: 0 }
+  #shortcuts { display: none }
+  .layout { grid-template-columns: 1fr }
+}
+@media (max-width: 600px) {
+  .topbar { padding-inline: 10px; gap: 4px }
+  .brand { font-size: .9rem }
+  /* Keep only the coloured dot; the state stays in the accessible text. */
+  #connection { font-size: 0; margin-right: 2px }
+  .who summary .account-roles { display: none }
+  .who summary { padding-right: 12px }
+  #account-alias { max-width: 6rem }
+}
 @media (max-width: 545px) { .rail { grid-template-columns: 1fr 1fr; gap: 8px } .station::after { display: none } .panel { padding: 12px } }

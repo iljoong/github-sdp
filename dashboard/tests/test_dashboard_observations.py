@@ -6,7 +6,8 @@ from types import SimpleNamespace
 
 from dashboard.config import Target
 from dashboard.evidence import Evidence, UnsafeArtifact, read_member
-from dashboard.observations import DashboardReader, candidate, job_states, runtime_sample, safe_env
+from dashboard.observations import (DashboardReader, candidate, job_states, previous_revision, runtime_sample,
+                                    safe_env)
 
 
 def archive(entries):
@@ -15,6 +16,87 @@ def archive(entries):
         for key, value in entries.items():
             z.writestr(key, json.dumps(value))
     return buffer.getvalue()
+
+
+SHA = "c" * 40
+TARGETS = {r: Target(f"/sample-{r}", f"app-{r}") for r in ("kr", "sea", "usw")}
+STABLE, CANDIDATE = "app-kr--r5", "app-kr--r7"
+ARTIFACTS = {
+    7: [{"id": 70, "name": "baseline-7-kr", "expired": False},
+        {"id": 71, "name": "evidence-7-kr-1", "expired": False}],
+    8: [{"id": 80, "name": "restore-evidence-8-kr-1", "expired": False}],
+}
+BLOBS = {
+    70: {"baseline-kr.json": {"run_id": "7", "repository": "owner/repo", "region": "kr", "commit": SHA,
+                              "app_id": "/sample-kr", "candidate": CANDIDATE, "stable": STABLE,
+                              "traffic": {STABLE: 100}}},
+    71: {"kr/success.json": {"revision": CANDIDATE, "profile": "demo"}},
+    80: {"kr/rollback.json": {"verified": True, "source_run": "7", "stable": STABLE}},
+}
+
+
+class EvidenceDisplay:
+    """Reader wired to offline fakes; counts artifact downloads through the injected downloader."""
+
+    def __init__(self, status):
+        self.downloads = []
+        self.run = {"id": 7, "path": ".github/workflows/release.yml", "head_branch": "main", "event": "workflow_dispatch",
+                    "repository": {"id": 12}, "run_attempt": 1, "status": status, "head_sha": SHA,
+                    "conclusion": "success" if status == "completed" else None}
+        github = SimpleNamespace(runs=lambda *_, **__: [self.run], run=lambda _: self.run, jobs=lambda *_: [],
+                                 artifacts=lambda run_id: ARTIFACTS.get(run_id, []),
+                                 artifact_location=lambda artifact_id: f"https://blob/{artifact_id}")
+        ops = [{"operation_id": "o1", "kind": "rollback", "status": "completed", "source_run_id": 7, "run_id": 8,
+                "region": "kr", "actor": "a", "created_at": "t"}]
+        store = SimpleNamespace(recent=lambda: ops, unresolved=lambda: False, claimed=lambda _: False,
+                                by_run=lambda _: None)
+        evidence = Evidence(github, self._download)
+        self.reader = DashboardReader(SimpleNamespace(repo="owner/repo", repo_id=12), TARGETS, github, evidence,
+                                      SimpleNamespace(rules=lambda _: []), store, SimpleNamespace(region=self._azure))
+
+    def _download(self, url):
+        artifact_id = int(url.rsplit("/", 1)[-1])
+        self.downloads.append(artifact_id)
+        return archive(BLOBS[artifact_id])
+
+    @staticmethod
+    def _azure(target, run_id, detail, baseline):
+        result = {"observed_at": "t", "traffic": {CANDIDATE: 100}, "candidate": CANDIDATE, "candidate_weight": 100}
+        if detail:
+            result["baseline"] = baseline["stable"] if baseline else None
+            result["revisions"] = [{"name": STABLE, "active": True, "health": "Healthy"},
+                                   {"name": CANDIDATE, "active": True, "health": "Healthy"}]
+        return result
+
+    def snapshot(self):
+        return self.reader.snapshot(SimpleNamespace(roles={"ReleaseOperator"}, object_id="x"), 7, "kr")
+
+
+class EvidenceCachingTests(unittest.TestCase):
+    def test_in_progress_snapshot_downloads_no_artifacts(self):
+        fixture = EvidenceDisplay("in_progress")
+        fixture.snapshot()
+        self.assertEqual(fixture.downloads, [])
+
+    def test_previous_revision_label_falls_back_to_azure_traffic(self):
+        self.assertEqual(previous_revision({"app--r5": 90, "app--r7": 10}, "app--r7"), "app--r5")
+        self.assertEqual(previous_revision({"app--r3": 0, "app--r5": 50, "app--r7": 50}, "app--r7"), "app--r5")
+        self.assertIsNone(previous_revision({"app--r5": 0, "app--r7": 100}, "app--r7"))
+
+    def test_completed_run_downloads_each_artifact_once_across_snapshots(self):
+        fixture = EvidenceDisplay("completed")
+        first = fixture.snapshot()
+        second = fixture.snapshot()
+        self.assertEqual(sorted(fixture.downloads), [70, 71, 80])
+        self.assertEqual(first["actions"], second["actions"])
+        self.assertIsNone(second["actions"]["retire"])
+
+    def test_write_time_check_downloads_fresh_evidence_even_when_cached(self):
+        fixture = EvidenceDisplay("completed")
+        fixture.snapshot()
+        fixture.downloads.clear()
+        fixture.reader.check(SimpleNamespace(action="retire", source_run_id=7, region="kr"))
+        self.assertEqual(sorted(fixture.downloads), [70, 71])
 
 
 class ObservationTests(unittest.TestCase):
@@ -68,7 +150,7 @@ class ObservationTests(unittest.TestCase):
                     "app_id":"/sample", "candidate":"test-app--r52", "stable":"test-app--r49",
                     "traffic":{"test-app--r49":100, "test-app--r40":0}}
         reader = DashboardReader(SimpleNamespace(repo="owner/repo"), {"kr": target}, None,
-                                 SimpleNamespace(file=lambda *_: artifact), None, None)
+                                 SimpleNamespace(file=lambda *_, **__: artifact), None, None)
         self.assertEqual(reader.baseline({"id":52,"head_sha":"c"}, "kr"),
                          {"stable":"test-app--r49","candidate":"test-app--r52"})
         artifact["traffic"]["test-app--r40"] = 5

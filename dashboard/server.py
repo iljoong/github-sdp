@@ -131,15 +131,26 @@ def create_app():
     @app.get("/")
     def index(request: Request):
         user = actor(request)
+        # PROTOTYPE (throwaway branch prototype/dashboard-layout): ?variant=A|B|C, only when app.state.prototype is set.
+        prototype, variant = getattr(app.state, "prototype", None), request.query_params.get("variant", "A")
+        if prototype is not None and variant in ("A", "B", "C"):
+            short = {"ReleaseOperator": "Operator", "ReleaseApprover": "Approver"}
+            page = (STATIC / "prototype" / f"index-{variant}.html").read_text(encoding="utf-8")
+            for key, value in {"switch_account": SWITCH_ACCOUNT, "account_name": user.display_name or "이름 없는 계정",
+                               "account_alias": prototype.get("alias") or (user.display_name or "user").split()[0],
+                               "account_role": " · ".join(short.get(r, r) for r in sorted(user.roles))}.items():
+                page = page.replace("{{%s}}" % key, escape(value))
+            return HTMLResponse(page)
         roles = "".join(f'<span class="account-role">{escape(role)}</span>' for role in sorted(user.roles))
         page = INDEX.replace("{{switch_account}}", escape(SWITCH_ACCOUNT), 1)
         page = page.replace("{{account_roles}}", roles, 1)
         return HTMLResponse(page.replace("{{account_name}}", escape(user.display_name or "이름 없는 계정"), 1))
 
     @app.get("/assets/{name}")
-    def asset(request: Request, name: Literal["dashboard.css", "dashboard.js"]):
+    def asset(request: Request, name: Literal["dashboard.css", "dashboard.js", "prototype.css", "prototype.js"]):
         actor(request)
-        return FileResponse(STATIC / name, media_type="text/javascript" if name.endswith(".js") else "text/css")
+        path = STATIC / ("prototype" if name.startswith("prototype") else "") / name
+        return FileResponse(path, media_type="text/javascript" if name.endswith(".js") else "text/css")
 
     @app.get("/api/dashboard")
     def dashboard(request: Request, run_id: int | None = None, region: Literal["kr", "sea", "usw"] = "kr"):

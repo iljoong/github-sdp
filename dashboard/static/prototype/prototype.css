@@ -1,0 +1,103 @@
+/* PROTOTYPE (throwaway, branch prototype/dashboard-layout): layout variants over dashboard.css. */
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap }
+body.proto { padding-bottom: 64px }
+svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vertical-align: middle }
+
+/* Top bar */
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; height: 52px; padding: 0 16px;
+          background: var(--nav); color: white; position: sticky; top: 0; z-index: 5 }
+.brand { display: flex; align-items: center; gap: 9px; font-size: 1.02rem; letter-spacing: -.01em }
+.logo { display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: var(--blue); color: white }
+.tools { display: flex; align-items: center; gap: 6px }
+.tools #connection { color: #b9c8dc; font-size: .8rem; margin-right: 6px }
+.tools #connection::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: #8aa0bb }
+.tools #connection[data-mode=stream]::before { background: #3ddc97; box-shadow: 0 0 0 3px #3ddc9733 }
+.tools #connection[data-mode=polling]::before { background: #8bb0ff }
+.tools #connection[data-mode=paused]::before, .tools #connection[data-mode=backoff]::before { background: #f0b45c }
+button.icon { display: inline-grid; place-items: center; width: 34px; height: 34px; padding: 0; border-radius: 8px;
+              background: transparent; color: #d8e6ff; border: 1px solid transparent }
+button.icon:not(:disabled):hover { background: #ffffff1a; border-color: transparent }
+.topbar #live[aria-pressed=true], .topbar #notify[aria-pressed=true] { background: #ffffff22; color: white; border-color: #ffffff33 }
+
+/* Identity pill */
+.who { position: relative; margin-left: 6px }
+.who summary { list-style: none; display: flex; align-items: center; gap: 6px; cursor: pointer; border-radius: 999px;
+               padding: 4px 5px 4px 12px; background: #ffffff1a; border: 1px solid #ffffff2e; font-size: .85rem; white-space: nowrap }
+.who summary::-webkit-details-marker { display: none }
+.who-alias { font-weight: 650 }
+.who-role { border-radius: 999px; padding: 1px 9px; background: var(--blue); color: white; font-size: .75rem; font-weight: 650 }
+.who-menu { position: absolute; right: 0; top: calc(100% + 8px); min-width: 230px; display: grid; gap: 6px; padding: 14px;
+            background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 10px 30px #0003 }
+.who-menu a { color: var(--blue); text-decoration: none }
+.who-menu .signout { display: flex; align-items: center; gap: 6px; border-top: 1px solid var(--soft); padding-top: 8px; margin-top: 4px }
+
+/* Shell: sidebar + content */
+.shell { display: grid; grid-template-columns: 270px minmax(0, 1fr); min-height: calc(100vh - 52px) }
+.sidebar { border-right: 1px solid var(--line); background: var(--surface); padding: 14px 12px; position: sticky; top: 52px;
+           height: calc(100vh - 52px); overflow-y: auto }
+.sidebar .new { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100% }
+.side-title { margin: 18px 4px 6px; font-size: .75rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted) }
+.releases li { border: 0; padding: 0 }
+.release-item { display: grid; gap: 2px; width: 100%; text-align: left; font-weight: 400; border: 1px solid transparent;
+                border-radius: 8px; padding: 8px 10px; background: transparent; margin-bottom: 4px }
+.release-item:not(:disabled):hover { background: var(--soft); border-color: transparent }
+.release-item[aria-current=true] { background: var(--selected); border-color: var(--blue) }
+.ri-top { display: flex; align-items: center; gap: 7px }
+.ri-state { margin-left: auto; font-size: .75rem; color: var(--muted) }
+.ri-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.release-item small { font-size: .76rem }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted) }
+[data-state=success] .dot { background: var(--good) }
+[data-state=failure] .dot, [data-state=cancelled] .dot { background: var(--bad) }
+[data-state=in_progress] .dot, [data-state=queued] .dot { background: var(--progress); box-shadow: 0 0 0 3px color-mix(in srgb, var(--progress) 25%, transparent) }
+[data-state=waiting] .dot { background: var(--warn-line) }
+.content { padding: 20px clamp(14px, 2.5vw, 32px); min-width: 0 }
+.content > * + * { margin-top: 14px }
+.release-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px }
+.release-head h1 { font-size: clamp(1.3rem, 2.4vw, 1.75rem) }
+.release-head #meta { margin-top: 4px; font-size: .88rem }
+.icon-link { display: inline-grid; place-items: center; width: 34px; height: 34px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface) }
+#message { margin: 0; font-size: .85rem }
+.content .rail { margin-top: 14px }
+.grid-2 { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: 14px; align-items: start }
+.history-box summary { cursor: pointer; list-style: none }
+.history-box summary h2 { display: inline }
+
+/* B: compact steps + tabs */
+[data-variant=B] .rail { gap: 8px }
+[data-variant=B] .station { min-height: 0; padding: 8px 10px }
+[data-variant=B] .station .weight, [data-variant=B] .station .step { font-size: .78rem }
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-top: 18px }
+.tabs [role=tab] { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: .55rem .9rem; color: var(--muted) }
+.tabs [role=tab][aria-selected=true] { color: var(--ink); border-bottom-color: var(--blue) }
+.tabs .count:not(:empty) { margin-left: 6px; border-radius: 999px; padding: 0 7px; background: var(--warn-line); color: white; font-size: .75rem }
+[data-variant=B] [data-panel] { margin-top: 14px }
+[data-variant=B] [data-panel=audit] { display: grid; gap: 14px }
+[data-variant=B] [data-panel=audit][hidden] { display: none }
+
+/* C: banner + vertical pipeline + inspector */
+[data-variant=C] .inbox.banner { border-left: 4px solid var(--warn-line) }
+[data-variant=C] .inbox.banner:has(#inbox-list:empty) { display: none }
+.three { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 420px); gap: 16px; align-items: start }
+.center > * + * { margin-top: 14px }
+[data-variant=C] .rail { grid-template-columns: 1fr; gap: 18px; max-width: 520px }
+[data-variant=C] .station:not(:last-child)::after { top: 100%; left: 28px; width: 0; height: 19px; border-top: 0; border-left: 2px solid var(--rail) }
+[data-variant=C] .station { display: grid; grid-template-columns: 1fr auto; column-gap: 12px; min-height: 0; border-top-width: 1px; border-left: 4px solid var(--rail) }
+[data-variant=C] .station > .stages { grid-column: 1 / -1 }
+.inspector { position: sticky; top: 72px; display: grid; gap: 14px; max-height: calc(100vh - 90px); overflow-y: auto }
+
+/* Prototype switcher */
+.proto-switch { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 20; display: flex; align-items: center; gap: 10px;
+                padding: 6px 8px; border-radius: 999px; background: #111; color: #fff; box-shadow: 0 6px 20px #0006; font: 600 .85rem system-ui }
+.proto-switch button { background: #333; color: #fff; border: 0; border-radius: 999px; width: 30px; height: 30px; padding: 0 }
+#proto-label::before { content: "PROTOTYPE · "; color: #f0b45c }
+
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr }
+  .sidebar { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line) }
+  .releases { display: flex; gap: 6px; overflow-x: auto }
+  .release-item { min-width: 190px }
+  .grid-2, .three { grid-template-columns: 1fr }
+  .inspector { position: static; max-height: none }
+  .tools #connection { display: none }
+}

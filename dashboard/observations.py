@@ -55,6 +55,11 @@ def job_states(jobs, kind, region=None):
     return result
 
 
+def previous_revision(traffic, desired):
+    weighted = sorted((-weight, name) for name, weight in traffic.items() if weight and name != desired)
+    return weighted[0][1] if weighted else None
+
+
 def _revision_name(name, target):
     return isinstance(name, str) and bool(re.fullmatch(re.escape(target.app_name) + r"--[a-z0-9-]{1,70}", name))
 
@@ -111,7 +116,8 @@ class AzureReader:
                   "candidate_weight": traffic.get(desired, 0) if desired else None}
         if not detail:
             return result
-        stable = baseline["stable"] if baseline else None
+        # Without verified evidence (run still in progress), label the previous revision from live traffic.
+        stable = baseline["stable"] if baseline else previous_revision(traffic, desired)
         chosen = dict.fromkeys([stable, desired, *traffic])
         result["baseline"] = stable
         result["revisions"] = []
@@ -195,9 +201,9 @@ class DashboardReader:
         # known to be running or completed; use the signed rule request for the gate.
         return job_states(jobs, operation["kind"], operation.get("region")).get(region) in {"waiting", "pending"}
 
-    def baseline(self, run, region):
+    def baseline(self, run, region, fresh=False):
         run_id = run["id"]
-        data = self.evidence.file(run_id, f"baseline-{run_id}-{region}", f"baseline-{region}.json")
+        data = self.evidence.file(run_id, f"baseline-{run_id}-{region}", f"baseline-{region}.json", fresh=fresh)
         target = self.targets[region]
         if (not data or data.get("run_id") != str(run_id) or str(data.get("repository", "")).lower() != self.shared.repo
                 or data.get("region") != region or data.get("commit") != run.get("head_sha")
@@ -212,12 +218,12 @@ class DashboardReader:
             return None
         return {"stable": data["stable"], "candidate": data["candidate"]}
 
-    def _success(self, run, region, baseline):
+    def _success(self, run, region, baseline, fresh=False):
         run_id = run["id"]
-        data = self.evidence.file(run_id, f"evidence-{run_id}-{region}-1", f"{region}/success.json")
+        data = self.evidence.file(run_id, f"evidence-{run_id}-{region}-1", f"{region}/success.json", fresh=fresh)
         return data if data and data.get("revision") == baseline["candidate"] else {}
 
-    def recovery(self, command, run, baseline, azure):
+    def recovery(self, command, run, baseline, azure, fresh=False):
         if run.get("status") != "completed" or run.get("run_attempt") != 1:
             return "The original release must be completed on its first attempt"
         if not baseline:
@@ -232,7 +238,7 @@ class DashboardReader:
             if azure.get("traffic", {}).get(baseline["stable"]) == 100:
                 return "The baseline already receives all traffic"
             return None
-        success = self._success(run, azure["region"], baseline)
+        success = self._success(run, azure["region"], baseline, fresh)
         if success.get("profile") != "demo" or azure.get("candidate_weight") != 100:
             return "Retire requires verified demo evidence and candidate traffic at 100%"
         if rows.get(baseline["candidate"], {}).get("health") != "Healthy":
@@ -257,11 +263,12 @@ class DashboardReader:
         if run.get("status") != "completed" or run.get("run_attempt") != 1:
             raise InvalidAction("The original release must be completed on its first attempt")
         region = command.region
-        baseline = self.baseline(run, region)
+        # Write-time eligibility never trusts cached evidence.
+        baseline = self.baseline(run, region, fresh=True)
         if not baseline:
             raise InvalidAction("The deployment baseline is unavailable, expired or unverified")
         azure = self.azure.region(self.targets[region], run["id"], True, baseline)
-        reason = self.recovery(command.action, run, baseline, {**azure, "region": region})
+        reason = self.recovery(command.action, run, baseline, {**azure, "region": region}, fresh=True)
         if reason:
             raise InvalidAction(reason)
 
@@ -293,7 +300,8 @@ class DashboardReader:
                 run = next((row for row in recent if row.get("status") != "completed"), recent[0])
             if run:
                 states = job_states(self.github.jobs(run["id"], run["run_attempt"]), "deploy")
-                if run.get("run_attempt") == 1:
+                # Evidence cannot change any action until the source run completes.
+                if run.get("run_attempt") == 1 and run.get("status") == "completed":
                     baseline = self.baseline(run, region)
         except SOURCE_ERRORS:
             gh_available = False
@@ -315,7 +323,7 @@ class DashboardReader:
                     if op.get("kind") not in {"rollback", "retire"} or op.get("source_run_id") != run["id"] or not op.get("run_id"):
                         continue
                     pending.extend(self._pending_view(actor, op, unresolved))
-                    if op.get("region") != region:
+                    if op.get("region") != region or not baseline:
                         continue
                     artifact_id = op["run_id"]
                     if op["kind"] == "rollback" and restored is None:

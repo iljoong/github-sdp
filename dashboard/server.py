@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict
 from .auth import Denied, EntraSession, actor_from_principal, verify_write_origin
 from .config import Settings, positive
 from .evidence import Evidence
-from .github import GitHub, ReadCache, RemoteError, Tokens
+from .github import GitHub, ReadCache, RemoteError, Tokens, close_transport
 from .memo import AzureMemo
 from .observations import DashboardReader, AzureReader
 from .operations import Command, InvalidAction, Operations
@@ -59,19 +59,22 @@ async def lifespan(app):
         shared = settings.shared
         token = Tokens(settings.app_client_id, shared.installation_id, shared.repo_id, sign)
         github = GitHub(shared.repo, token)
-        observer = GitHub(shared.repo, token, ReadCache())
+        read_cache = ReadCache()
+        observer = GitHub(shared.repo, token, read_cache)
         store = OperationsTable(service.get_table_client("dashboardops"), str(shared.repo_id))
         inbox = Inbox(service.get_table_client("dashboardinbox"), str(shared.repo_id))
         app.state.settings = settings
+        app.state.read_cache = read_cache
         app.state.verify_session = EntraSession(settings.tenant_id, settings.entra_client_id)
         # Display reads share Azure observations briefly; write-time checks below read Azure directly.
         app.state.reader = DashboardReader(shared, settings.targets, observer, Evidence(observer), inbox, store,
                                            AzureMemo(azure))
         app.state.operations = Operations(store, github, DashboardReader(
-            shared, settings.targets, github, Evidence(github), inbox, store, azure))
+            shared, settings.targets, github, Evidence(github), inbox, store, azure), read_cache.invalidate)
         yield
     finally:
         azure.close()
+        close_transport()
         signing.close()
         service.close()
         credential.close()

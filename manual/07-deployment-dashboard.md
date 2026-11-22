@@ -40,7 +40,7 @@ az bicep build --file infra\dashboard.bicep --stdout
 - 검증용 GitHub 환경의 `prod-kr`, `prod-sea`, `prod-usw`, `prod-rollback-*`에서 이 App의 custom protection rule을 사용합니다. branch 제한은 유지하고, 기존 required reviewer가 남아 있으면 별도로 만족해야 합니다. `build` 환경에 사람 gate가 있는지 확인합니다. 기존 환경이 custom rule을 받도록 수정하기 **전에** 되돌릴 보호 설정을 기록합니다.
 - demo run을 관제실에서 시작하고 정확한 run ID가 돌아오는지 확인합니다. KR → SEA → USW 순서로 별도 관리자가 승인하고, webhook delivery 및 GitHub job 상태가 맞는지 확인합니다. 거부·취소 후에는 자동 복구를 추정하지 말고 artifact/Azure 트래픽을 대조합니다. 완료한 run에서 한 지역 롤백과 별도 demo run의 retire를 각각 검증합니다. retire 후 이전 revision 재활성화가 별도 절차라는 점을 확인합니다.
 - GitHub의 자동 redelivery를 가정하지 않습니다. 서명된 webhook 실패 시 GitHub App의 최근 배달에서 상태를 점검하고 필요하면 그 delivery를 redeliver합니다. 정책을 끄거나 수동으로 통과시키기 전에 이상 원인을 조사합니다.
-- 화면의 GitHub 조회는 콘솔 인스턴스 내에서 최대 30초간 공유되며, 승인·취소·배포를 실제로 요청할 때는 캐시를 사용하지 않고 조건을 다시 확인합니다.
+- 화면의 GitHub 조회는 콘솔 인스턴스 내에서 공유됩니다. 진행 중인 run(및 그 job·승인 대기)과 run 목록은 약 5초, 완료된 run은 약 5분간 재사용하며(ETag 조건부 재조회 유지), 콘솔에서 배포·취소·승인/거절을 요청하면 해당 run과 run 목록의 캐시를 즉시 무효화합니다. 승인·취소·배포를 실제로 요청할 때는 캐시를 사용하지 않고 조건을 다시 확인합니다.
 - 운영 정책은 GitHub `Required reviewers`를 관제실의 Entra `ReleaseApprover`와 GitHub App 보호 규칙으로 대체합니다. 브랜치 제한은 그대로 유지하고, 각 환경의 App 규칙 활성화를 다음 배포 전에 확인합니다. 전환 후 CLI에서 직접 시작한 release/restore/retire, `release-kr.yml`은 관제실에서 승인할 수 없습니다. 전환 전에 관제실 장애 시 사용할 별도 승인 경로를 마련하고 비운영 환경에서 검증합니다.
 
 ## 운영 중 문제 해결

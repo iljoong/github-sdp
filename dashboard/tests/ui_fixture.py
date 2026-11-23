@@ -52,7 +52,8 @@ def fixture_app(port):
     def request(actor, command):
         state["writes"].append({"action": command.action, "source_run_id": command.source_run_id,
                                 "region": command.region})
-        return {"status": "accepted", "run_id": 901} if command.action == "deploy" else {"status": "accepted"}
+        return ({"status": "accepted", "run_id": {"deploy": 901, "resume": 902}[command.action]}
+                if command.action in ("deploy", "resume") else {"status": "accepted"})
 
     def review(actor, operation_id, environment, approved):
         state["reviews"].append({"operation_id": operation_id, "environment": environment, "approved": approved})

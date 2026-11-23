@@ -10,7 +10,7 @@ const statuses = {
   rejected: "GitHub에서 요청 거부", confirmation_required: "결과 확인 필요"
 };
 const labels = {deploy: "새 배포", cancel: "배포 취소", rollback: "롤백 요청",
-                retire: "이전 리비전 종료", approve: "승인", reject: "거부"};
+                retire: "이전 리비전 종료", resume: "실패 지역부터 재개", approve: "승인", reject: "거부"};
 // Inbox reason for a protection rule raised by a GitHub re-run (attempt > 1): approve is refused, reject allowed.
 const RERUN = "Re-run blocked — reject only";
 const descriptions = {
@@ -18,6 +18,7 @@ const descriptions = {
   cancel: "릴리스를 취소합니다. 취소만으로 트래픽이 복구되었다고 볼 수 없습니다.",
   rollback: "원본 릴리스의 이 지역 기준 상태로 복구를 요청합니다. 복구 환경의 승인이 필요합니다.",
   retire: "후보가 트래픽 100%를 유지하는 동안 이전 리비전을 비활성화합니다. 재활성화 전에는 기존 복구가 불가능합니다.",
+  resume: "원본 릴리스의 이미지로 새 릴리스를 시작합니다. 성공한 지역은 건너뛰며, 각 지역은 별도 승인자의 승인이 필요합니다.",
   approve: "Entra 사용자로 이 환경의 GitHub App 보호 규칙을 승인합니다.",
   reject: "이 환경의 보호 규칙을 거부합니다."
 };
@@ -41,11 +42,19 @@ const reasonText = {
   "Retire requires verified demo evidence and candidate traffic at 100%": "검증된 demo 증거와 후보 트래픽 100%가 필요합니다.",
   "The candidate is not verified healthy": "후보 리비전의 헬스를 확인할 수 없습니다.",
   "Select this release to verify its recovery evidence": "이 릴리스를 선택하면 복구 근거를 확인합니다.",
+  "Only a failed or cancelled release can be resumed": "실패했거나 취소된 릴리스만 재개할 수 있습니다.",
+  "Every region already succeeded": "모든 지역이 이미 성공했습니다.",
+  "An earlier region did not succeed in the latest attempt": "최근 시도에서 앞선 지역이 성공하지 않았습니다.",
+  "The source release did not build an image": "원본 릴리스가 이미지를 빌드하지 않았습니다.",
+  "This release was itself a resume; resume its source release instead": "이 릴리스는 재개 실행입니다. 원본 릴리스에서 재개하세요.",
+  "The start region's traffic is not on exactly one healthy revision at 100%": "시작 지역 트래픽이 정상 리비전 하나에 100% 있지 않습니다.",
+  "Recovery evidence is unavailable": "복구 근거를 확인할 수 없습니다.",
   [RERUN]: "GitHub 재실행(Re-run)은 배포할 수 없어 승인할 수 없습니다. 거부하면 GitHub 실행이 즉시 종료됩니다."
 };
 const allowedBecause = {
   rollback: "검증된 기준 스냅샷 · 이전 리비전 활성/정상 · 현재 트래픽이 이 릴리스에 속함",
-  retire: "검증된 demo 증거 · 후보 트래픽 100% · 후보와 이전 리비전 정상"
+  retire: "검증된 demo 증거 · 후보 트래픽 100% · 후보와 이전 리비전 정상",
+  resume: "원본 실패/취소 · 앞선 지역 모두 성공 · 시작 지역 트래픽이 정상 리비전 하나에 100%"
 };
 const eventText = {job_started: "시작", approval_requested: "승인 요청"};
 const regionKeys = {Digit1: "kr", Digit2: "sea", Digit3: "usw", Numpad1: "kr", Numpad2: "sea", Numpad3: "usw"};
@@ -336,6 +345,12 @@ function historyEntry({entry, current}) {
   }
   item.append(head);
   if (entry.display_title) item.append(node("span", entry.display_title));
+  if (entry.resumed_from) {
+    const link = node("button", `#${entry.resumed_from}에서 재개`); link.type = "button"; link.className = "select";
+    link.setAttribute("aria-label", `재개 원본 릴리스 #${entry.resumed_from} 선택`);
+    link.onclick = () => selectRun(String(entry.resumed_from));
+    item.append(link);
+  }
   item.append(
     node("small", `시작 ${timestamp(entry.started_at)} · 소요 ${entry.duration_seconds == null ? "미확인" : duration(entry.duration_seconds)} · 프로필 ${entry.profile ?? "미확인"}`),
     node("small", `커밋 ${entry.commit?.slice(0, 7) ?? "미확인"} · 요청자 ${entry.requester ?? "미확인"}`));
@@ -515,7 +530,7 @@ function render(snapshot) {
   });
   $("deploy").disabled = Boolean(snapshot.actions.deploy) || writing;
   $("deploy").title = reasonText[snapshot.actions.deploy] ?? snapshot.actions.deploy ?? "";
-  keyed($("operations"), ["cancel", "rollback", "retire"].map(kind => [kind, {kind, reason: snapshot.actions[kind], run: run?.id}]),
+  keyed($("operations"), ["cancel", "rollback", "retire", "resume"].map(kind => [kind, {kind, reason: snapshot.actions[kind], run: run?.id}]),
     value => commandButton(value.kind, value.reason, value.run));
   keyed($("audit"), snapshot.audit.map((row, index) => [`${row.operation_id ?? index}`, row]), row => {
     const entry = node("li", `${labels[row.kind] ?? row.kind} · ${label(row.status)}`);
@@ -703,6 +718,16 @@ function recoveryContext(kind, runId, region) {
   };
 }
 
+function resumeContext(runId) {
+  const start = data?.resume_start;
+  return {
+    "원본 릴리스": `#${runId}`,
+    "시작 지역": start ? `${start.toUpperCase()} · ${regionNames[start]} · prod-${start} (서버가 결정)` : "미확인",
+    "이미지": "원본 이미지 재사용 · 재빌드 없음 · 앞선 성공 지역은 건너뜀",
+    "허용 근거": allowedBecause.resume
+  };
+}
+
 function typedOk() { return !typedRegion || $("typed").value.trim().toLowerCase() === typedRegion; }
 function checkTyped() { $("confirm-apply").disabled = !typedOk(); }
 
@@ -715,8 +740,9 @@ function confirm(kind, runId, gate) {
   $("profile-row").hidden = kind !== "deploy";
   $("profile").value = "demo";
   // Rollback and retire change production traffic: show the full context and require the typed region code.
-  $("confirm-context").hidden = !recovery;
-  if (recovery) dictionary(recoveryContext(kind, runId, region), $("confirm-context"));
+  const context = recovery ? recoveryContext(kind, runId, region) : kind === "resume" ? resumeContext(runId) : null;
+  $("confirm-context").hidden = !context;
+  if (context) dictionary(context, $("confirm-context"));
   else $("confirm-context").replaceChildren();
   typedRegion = recovery ? region : null;
   $("typed-row").hidden = !recovery;
@@ -750,7 +776,7 @@ async function submit(kind, runId, region, gate) {
     const result = await response.json().catch(() => ({}));
     // An accepted decision leaves the inbox at once, even while GitHub still reports the gate as waiting.
     if (gate && response.ok && result.status === "accepted") decided.set(gateKey(gate), Date.now() + 120000);
-    if (result.run_id && kind === "deploy") {
+    if (result.run_id && ["deploy", "resume"].includes(kind)) {
       selectedRun = String(result.run_id);
       navigate();
     }

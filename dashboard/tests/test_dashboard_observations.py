@@ -805,7 +805,8 @@ class ResumeTests(unittest.TestCase):
                             "actor": "requester", "created_at": iso(T0)})
         snapshot = console.snapshot(run_id=7)
         self.assertEqual(snapshot["inbox"], [{"operation_id": "o9", "run_id": 9, "kind": "deploy", "region": "usw",
-                                              "environment": "prod-usw", "reason": None, "source_run_id": 7}])
+                                              "environment": "prod-usw", "reason": None, "source_run_id": 7,
+                                              "run_attempt": 1, "rerun": False}])
         self.assertEqual({entry["id"]: entry["resumed_from"] for entry in snapshot["history"]}, {7: None, 9: 7})
         self.assertEqual(console.snapshot(run_id=9)["pending"], snapshot["inbox"])
 

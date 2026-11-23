@@ -1,0 +1,90 @@
+name: Deploy deployment dashboard (console + webhook receiver)
+# Manual only. Tests the dashboard, builds one image, pushes it to ACR once and
+# points both existing Container Apps (console and receiver) at the same digest.
+# Infrastructure, secrets, identities and Easy Auth stay owned by infra/dashboard.bicep;
+# this workflow changes only the container image. See manual/07-deployment-dashboard.md.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: deployment-dashboard
+  cancel-in-progress: false
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment: dashboard
+    timeout-minutes: 30
+    env:
+      ACR_NAME: ${{ vars.ACR_NAME }}
+      RESOURCE_GROUP: ${{ vars.RESOURCE_GROUP }}
+      CONSOLE_APP: ${{ vars.CONSOLE_APP }}
+      RECEIVER_APP: ${{ vars.RECEIVER_APP }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Test dashboard
+        run: |
+          python -m pip install --quiet -r dashboard/requirements.txt
+          PYTHONPATH="$PWD" python -m unittest discover -s dashboard/tests -p 'test_*.py'
+          python -m compileall -q dashboard
+      - uses: azure/login@8c334a195cbb38e46038007b304988d888bf676a
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Build and push once; resolve immutable digest
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$ACR_NAME" =~ ^[a-z0-9]{5,50}$ ]] || exit 1
+          server=$(az acr show -n "$ACR_NAME" --query loginServer -o tsv)
+          az acr login -n "$ACR_NAME"
+          tag="deployment-dashboard:run-${GITHUB_RUN_ID}"
+          docker build --platform linux/amd64 --file dashboard/Dockerfile -t "$server/$tag" dashboard
+          docker push "$server/$tag"
+          digest=$(az acr repository show -n "$ACR_NAME" --image "$tag" --query digest -o tsv)
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          docker logout "$server"
+          echo "image=$server/deployment-dashboard@$digest" >> "$GITHUB_OUTPUT"
+      - name: Update receiver and console to the same digest
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: |
+          set -euo pipefail
+          az config set extension.use_dynamic_install=yes_without_prompt --only-show-errors
+          for app in "$RECEIVER_APP" "$CONSOLE_APP"; do
+            [[ "$app" =~ ^[a-z0-9-]{2,32}$ ]] || exit 1
+            az containerapp update -g "$RESOURCE_GROUP" -n "$app" --image "$IMAGE" --only-show-errors -o none
+          done
+      - name: Verify the new revisions are healthy
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: |
+          set -euo pipefail
+          for app in "$RECEIVER_APP" "$CONSOLE_APP"; do
+            for attempt in $(seq 1 30); do
+              read -r latest ready image < <(az containerapp show -g "$RESOURCE_GROUP" -n "$app" \
+                --query "[properties.latestRevisionName, properties.latestReadyRevisionName, properties.template.containers[0].image]" -o tsv | tr '\n' ' ')
+              state=$(az containerapp revision show -g "$RESOURCE_GROUP" -n "$app" --revision "$latest" \
+                --query "join(' ', [properties.healthState, properties.runningState])" -o tsv)
+              echo "$app $latest ready=$ready $state"
+              if [[ "$image" == "$IMAGE" && "$latest" == "$ready" && "$state" == Healthy* ]]; then
+                break
+              fi
+              [[ "$attempt" -lt 30 ]] || { echo "::error::$app revision $latest did not become healthy"; exit 1; }
+              sleep 10
+            done
+          done
+          fqdn=$(az containerapp show -g "$RESOURCE_GROUP" -n "$RECEIVER_APP" --query properties.configuration.ingress.fqdn -o tsv)
+          curl --fail --silent --show-error --max-time 15 "https://$fqdn/healthz"
+          console=$(az containerapp show -g "$RESOURCE_GROUP" -n "$CONSOLE_APP" --query properties.configuration.ingress.fqdn -o tsv)
+          echo "### Deployed \`$IMAGE\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Console: https://$console" >> "$GITHUB_STEP_SUMMARY"

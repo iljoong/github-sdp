@@ -223,7 +223,7 @@ def run(fixture, headed, screenshot=None):
             expect(page.locator("#deploy svg")).to_have_count(1)
             pill = page.locator("#account summary")
             expect(pill.locator("#account-alias")).to_have_text("fixture.op")
-            expect(pill.locator(".account-role")).to_have_text(["Approver", "Operator"])
+            expect(pill.locator(".account-role")).to_have_text(["Operator", "Approver"])
             menu = page.locator("#account .who-menu")
             expect(menu).to_be_hidden()
             pill.click()

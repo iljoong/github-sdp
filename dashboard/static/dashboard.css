@@ -84,6 +84,9 @@ button.icon:not(:disabled):hover { background: #ffffff1a; border-color: #ffffff3
 .icon-link { display: inline-grid; place-items: center; width: 34px; height: 34px; flex: none; border: 1px solid var(--line); border-radius: 8px; background: var(--surface) }
 #message { margin: 8px 0 0; font-size: .85rem }
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 9px; padding: 17px; min-width: 0 }
+/* Access-denied page for signed-in users without a dashboard role */
+.denied { max-width: 720px; margin: 0 auto }
+.denied-actions { display: flex; gap: 16px; flex-wrap: wrap }
 .rail { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 14px }
 .station { border: 1px solid var(--line); border-top: 4px solid var(--rail); border-radius: 6px; padding: 8px 10px; text-align: left; position: relative }
 .station .weight, .station .step { font-size: .78rem }

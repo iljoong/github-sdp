@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>접근 제한 - Deployment Dashboard</title>
+  <link rel="stylesheet" href="/assets/dashboard.css">
+</head>
+<body>
+  <header class="topbar">
+    <span class="brand"><strong>Deployment Dashboard</strong></span>
+  </header>
+  <main class="content denied">
+    <section class="panel" aria-labelledby="denied-title">
+      <h1 id="denied-title">접근이 제한되었습니다</h1>
+      <p>로그인한 계정 <bdi id="denied-account">{{account_username}}</bdi>에 배포 관제실 역할이 할당되어 있지 않습니다.
+        역할이 없는 사용자는 이 콘솔에 접근할 수 없습니다.</p>
+      <p>접근이 필요하면 Entra 앱 관리자에게 <code>ReleaseOperator</code>(배포 요청) 또는
+        <code>ReleaseApprover</code>(배포 승인) 역할 할당을 요청하세요. 역할을 할당받은 뒤에는 다시 로그인해야 적용됩니다.</p>
+      <p class="denied-actions"><a id="switch-account" href="{{switch_account}}">다른 계정으로 로그인</a>
+        <a id="sign-out" href="/.auth/logout">Sign out</a></p>
+    </section>
+  </main>
+</body>
+</html>

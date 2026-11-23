@@ -15,6 +15,14 @@ class Denied(Exception):
     pass
 
 
+class RoleRequired(Denied):
+    """A signed-in user of this tenant who holds no dashboard role."""
+
+    def __init__(self, username=""):
+        super().__init__("An assigned Entra user role is required")
+        self.username = username
+
+
 class SessionExpired(Denied):
     """An otherwise valid Entra session whose ID token has expired; the platform can renew it."""
 
@@ -57,10 +65,12 @@ def actor_from_principal(header: str | None, tenant_id: str) -> Actor:
         names = [value.strip() for name in ("preferred_username", "upn", SOAP + "upn")
                  for value in sorted(claims.get(name, ())) if value.strip()]
         has_user_name = any(claims.get(name) for name in ("preferred_username", "upn", SOAP + "upn"))
-        if tenant != tenant_id or not roles or (kind != "user" and (kind or not has_user_name)):
+        if tenant != tenant_id or (kind != "user" and (kind or not has_user_name)):
             raise ValueError
     except (AttributeError, KeyError, TypeError, ValueError, UnicodeError, binascii.Error):
         raise Denied("An assigned Entra user role is required") from None
+    if not roles:
+        raise RoleRequired(next(iter(names), ""))
     return Actor(tenant, oid, roles, username=next(iter(names), ""))
 
 

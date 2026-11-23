@@ -111,8 +111,24 @@ class DashboardHTTPTests(unittest.TestCase):
         self.assertEqual(banner.find(".//*[@id='account-alias']").text, 't<o>m&"x')
         self.assertIn("Test <Admin>", banner.find(".//summary").attrib["aria-label"])
         self.assertEqual([item.text for item in banner.findall(".//span[@class='account-role']")],
-                         ["Approver", "Operator"])
+                         ["Operator", "Approver"])
         self.assertNotIn("<Admin>", response.text)
+
+    def test_signed_in_user_without_a_role_sees_an_access_page_instead_of_the_console(self):
+        headers = {"x-ms-client-principal": principal(), "x-ms-token-aad-id-token": "valid-fixture"}
+        page = self.client.get("/?run=34", headers=headers)
+        self.assertEqual(page.status_code, 403)
+        self.assertIn("text/html", page.headers["content-type"])
+        self.assertIn("접근이 제한되었습니다", page.text)
+        self.assertIn("operator@example.test", page.text)
+        self.assertNotIn("dashboard.js", page.text)
+        self.assertNotIn("{{", page.text)
+        self.assertEqual(self.client.get("/assets/dashboard.css", headers=headers).status_code, 200)
+        self.assertEqual(self.client.get("/assets/dashboard.js", headers=headers).status_code, 403)
+        data = self.client.get("/api/dashboard", headers=headers)
+        self.assertEqual((data.status_code, data.json()), (403, {"detail": "An assigned Entra user role is required"}))
+        other_tenant = {**headers, "x-ms-client-principal": principal(tenant=USER)}
+        self.assertNotIn("접근이 제한되었습니다", self.client.get("/", headers=other_tenant).text)
 
     def test_alias_falls_back_to_the_first_word_of_the_display_name(self):
         self.client.app.state.verify_session = lambda _: Actor(

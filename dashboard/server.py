@@ -15,7 +15,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from pydantic import BaseModel, ConfigDict
 from starlette.concurrency import run_in_threadpool
 
-from .auth import APPROVER, OPERATOR, Denied, EntraSession, SessionExpired, actor_from_principal, verify_write_origin
+from .auth import (APPROVER, OPERATOR, Denied, EntraSession, RoleRequired, SessionExpired, actor_from_principal,
+                   verify_write_origin)
 from .changes import ChangeFeed
 from .config import Settings, positive
 from .evidence import Evidence
@@ -27,6 +28,8 @@ from .store import Conflict, Inbox, OperationsTable, table_clients
 
 STATIC = Path(__file__).with_name("static")
 INDEX = (STATIC / "index.html").read_text(encoding="utf-8")
+NO_ROLE = (STATIC / "no-role.html").read_text(encoding="utf-8")
+# Display order follows the workflow: an operator requests, an approver decides.
 SHORT_ROLES = {OPERATOR: "Operator", APPROVER: "Approver"}
 SWITCH_ACCOUNT = "/.auth/logout?" + urlencode({
     "post_logout_redirect_uri": "/.auth/login/aad?" + urlencode({
@@ -137,6 +140,10 @@ def create_app():
     def health():
         return {"ok": True}
 
+    def render(template, values):
+        # One pass, so that values taken from the session are never scanned for further placeholders.
+        return re.sub(r"\{\{(\w+)\}\}", lambda match: values[match.group(1)], template)
+
     @app.get("/")
     def index(request: Request):
         try:
@@ -145,7 +152,10 @@ def create_app():
             # A reload after the ID token expired signs in again and returns to the same view.
             back = "/" + (f"?{request.url.query}" if request.url.query else "")
             return RedirectResponse("/.auth/login/aad?" + urlencode({"post_login_redirect_uri": back}), 302)
-        roles = [SHORT_ROLES.get(role, role) for role in sorted(user.roles)]
+        except RoleRequired as missing:
+            values = {"switch_account": escape(SWITCH_ACCOUNT), "account_username": escape(missing.username or "알 수 없음")}
+            return HTMLResponse(render(NO_ROLE, values), 403)
+        roles = [label for role, label in SHORT_ROLES.items() if role in user.roles]
         name = user.display_name or "이름 없는 계정"
         alias = user.username.split("@", 1)[0] or (user.display_name.split() or ["계정"])[0]
         values = {
@@ -153,12 +163,16 @@ def create_app():
             "account_username": escape(user.username), "account_role_text": escape(", ".join(roles)),
             "account_roles": "".join(f'<span class="account-role">{escape(role)}</span>' for role in roles),
         }
-        # One pass, so that values taken from the session are never scanned for further placeholders.
-        return HTMLResponse(re.sub(r"\{\{(\w+)\}\}", lambda match: values[match.group(1)], INDEX))
+        return HTMLResponse(render(INDEX, values))
 
     @app.get("/assets/{name}")
     def asset(request: Request, name: Literal["dashboard.css", "dashboard.js"]):
-        actor(request)
+        try:
+            actor(request)
+        except RoleRequired:
+            # The access-denied page is styled with the console stylesheet; the script stays role-gated.
+            if name != "dashboard.css":
+                raise
         return FileResponse(STATIC / name, media_type="text/javascript" if name.endswith(".js") else "text/css")
 
     @app.get("/api/dashboard")

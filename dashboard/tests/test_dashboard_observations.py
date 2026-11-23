@@ -105,6 +105,52 @@ class EvidenceCachingTests(unittest.TestCase):
         self.assertEqual(sorted(fixture.downloads), [70, 71])
 
 
+class RerunRecoveryTests(unittest.TestCase):
+    """Recovery of a release that GitHub re-ran: evidence and baseline still come from attempt 1."""
+
+    @staticmethod
+    def rerun(jobs_by_attempt=None, attempt=2):
+        fixture = EvidenceDisplay("completed")
+        fixture.run["run_attempt"] = attempt
+        fixture.jobs_read = []
+
+        def jobs(run_id, number):
+            fixture.jobs_read.append(number)
+            return (jobs_by_attempt or {}).get(number, [])
+
+        fixture.reader.github.jobs = jobs
+        return fixture
+
+    def test_rollback_is_eligible_for_a_completed_rerun_with_a_verified_baseline(self):
+        fixture = self.rerun()
+        self.assertIsNone(fixture.snapshot()["actions"]["rollback"])
+        fixture.reader.check(SimpleNamespace(action="rollback", source_run_id=7, region="kr"))
+
+    def test_retire_is_refused_when_a_later_attempt_started_the_region_rollout(self):
+        fixture = self.rerun({2: [{"name": "korea / rollout", "run_attempt": 2, "status": "completed",
+                                   "conclusion": "failure", "started_at": "2026-11-22T10:00:00Z",
+                                   "steps": [{"name": "Shift 10%", "status": "completed", "conclusion": "failure"}]}]})
+        reason = "A later attempt of this release ran the region's rollout"
+        self.assertEqual(fixture.snapshot()["actions"]["retire"], reason)
+        with self.assertRaisesRegex(InvalidAction, reason):
+            fixture.reader.check(SimpleNamespace(action="retire", source_run_id=7, region="kr"))
+
+    def test_retire_stays_eligible_when_later_attempts_never_started_the_region_rollout(self):
+        fixture = self.rerun({2: [{"name": "korea / rollout", "run_attempt": 1, "status": "completed",
+                                   "conclusion": "success", "steps": [{"name": "Shift 10%"}]},
+                                  {"name": "westus / rollout", "run_attempt": 2, "status": "completed",
+                                   "conclusion": "failure", "steps": [{"name": "Shift 10%"}]}],
+                              3: [{"name": "korea / rollout", "run_attempt": 3, "status": "completed",
+                                   "conclusion": "cancelled", "steps": []}]}, attempt=3)
+        self.assertIsNone(fixture.snapshot()["actions"]["retire"])
+        fixture.reader.check(SimpleNamespace(action="retire", source_run_id=7, region="kr"))
+
+    def test_first_attempt_retire_reads_no_later_attempts(self):
+        fixture = self.rerun(attempt=1)
+        self.assertIsNone(fixture.snapshot()["actions"]["retire"])
+        self.assertNotIn(2, fixture.jobs_read)
+
+
 class ObservationTests(unittest.TestCase):
     def test_waiting_job_not_completed_just_because_traffic_at_100(self):
         jobs = [{"name": "build / build", "status": "completed", "conclusion": "success"},
@@ -474,10 +520,9 @@ class ReleaseHistoryTests(unittest.TestCase):
         history = {entry["id"]: entry["actions"] for entry in console.snapshot(run_id=7, actor=OPERATOR_ACTOR)["history"]}
         unverified = "The deployment baseline is unavailable, expired or unverified"
         self.assertEqual(history[7], {"rollback": unverified, "retire": unverified})
-        self.assertEqual(history[6], {"rollback": "Select this release to verify its recovery evidence",
-                                      "retire": "Select this release to verify its recovery evidence"})
-        attempt = "The original release must be completed on its first attempt"
-        self.assertEqual(history[5], {"rollback": attempt, "retire": attempt})
+        select = "Select this release to verify its recovery evidence"
+        self.assertEqual(history[6], {"rollback": select, "retire": select})
+        self.assertEqual(history[5], {"rollback": select, "retire": select})
         viewer = console.snapshot(run_id=7)["history"]
         self.assertEqual(viewer[1]["actions"]["rollback"], "ReleaseOperator role required")
 

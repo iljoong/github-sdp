@@ -7,6 +7,16 @@ on:
         type: choice
         options: [production, demo]
         default: production
+      resume_from_run_id:
+        description: Resume only - completed release.yml run whose image is reused (empty = normal release with a new build)
+        type: string
+        required: false
+        default: ''
+      start_region:
+        description: Resume only - first region to deploy; every earlier region must have succeeded in the source run
+        type: choice
+        options: [kr, sea, usw]
+        default: kr
 permissions:
   contents: read
 concurrency:
@@ -14,15 +24,64 @@ concurrency:
   cancel-in-progress: false
 jobs:
   build:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && inputs.resume_from_run_id == ''
     uses: ./.github/workflows/build.yml
     permissions:
       contents: read
       id-token: write
     with:
       version_prefix: r
+  # Resume mode: no rebuild. Republish the source run's release record bound to
+  # this run so region.yml and its attempt-1 rerun guards run unchanged.
+  promote:
+    if: github.ref == 'refs/heads/main' && inputs.resume_from_run_id != ''
+    runs-on: ubuntu-24.04
+    environment: build
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    env:
+      SOURCE_RUN_ID: ${{ inputs.resume_from_run_id }}
+      START_REGION: ${{ inputs.start_region }}
+      ACR_NAME: ${{ vars.ACR_NAME }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Reject reruns
+        env:
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: test "$RUN_ATTEMPT" = "1" || { echo "Deploy reruns forbidden; restore or start a new release"; exit 1; }
+      - name: Verify source is a completed main release whose earlier regions succeeded
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/promote_source.py verify
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-${{ inputs.resume_from_run_id }}
+          path: source-release
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.resume_from_run_id }}
+      - name: Verify immutable source digest; rebind release record to this run
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: python scripts/promote_source.py rebind source-release/release.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ github.run_id }}
+          path: release.json
+          if-no-files-found: error
+          retention-days: 90
+  # Build and promote are mutually exclusive, so the skipped one must not skip
+  # the regions; !cancelled() replaces the implicit success() check.
   korea:
-    needs: build
+    needs: [build, promote]
+    if: >-
+      ${{ !cancelled() && ((inputs.resume_from_run_id == '' && needs.build.result == 'success')
+      || (inputs.resume_from_run_id != '' && inputs.start_region == 'kr' && needs.promote.result == 'success')) }}
     uses: ./.github/workflows/region.yml
     permissions:
       contents: read
@@ -33,8 +92,10 @@ jobs:
       environment: prod-kr
       profile: ${{ inputs.profile }}
   southeastasia:
-    needs: korea
-    if: needs.korea.result == 'success'
+    needs: [promote, korea]
+    if: >-
+      ${{ !cancelled() && (needs.korea.result == 'success'
+      || (inputs.resume_from_run_id != '' && inputs.start_region == 'sea' && needs.promote.result == 'success')) }}
     uses: ./.github/workflows/region.yml
     permissions:
       contents: read
@@ -45,8 +106,10 @@ jobs:
       environment: prod-sea
       profile: ${{ inputs.profile }}
   westus:
-    needs: southeastasia
-    if: needs.southeastasia.result == 'success'
+    needs: [promote, southeastasia]
+    if: >-
+      ${{ !cancelled() && (needs.southeastasia.result == 'success'
+      || (inputs.resume_from_run_id != '' && inputs.start_region == 'usw' && needs.promote.result == 'success')) }}
     uses: ./.github/workflows/region.yml
     permissions:
       contents: read

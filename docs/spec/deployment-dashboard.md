@@ -105,8 +105,8 @@ Non-goals
 | Deploy | `release.yml` on `main`, profile `demo`/`production` | Run ID obtained from `return_run_details`; ambiguous response is never re-dispatched or guessed |
 | Approve/reject | GitHub App protection rule for `prod-{kr,sea,usw}` and `prod-rollback-*` | Gate bound to a console-started run and operation; approver differs from requester; pending state and run attempt confirmed |
 | Cancel | GitHub run cancel | In-progress source release only; cancel success is not reported as recovery |
-| Regional rollback | `restore.yml` for one region | Completed source run, valid `baseline-<run>-<region>` evidence, stable revision active; workflow drift/health checks remain final |
-| Demo retire | `demo-retire.yml` | Completed `demo` run with explicit profile evidence, region success evidence, candidate at 100%; confirmation states that rollback then requires reactivation |
+| Regional rollback | `restore.yml` for one region | Completed source run (any run attempt), valid attempt-1 `baseline-<run>-<region>` evidence, stable revision active; workflow drift/health checks remain final |
+| Demo retire | `demo-retire.yml` | Completed `demo` run with explicit profile evidence, attempt-1 region success evidence, candidate at 100%, and no later run attempt started that region's rollout; confirmation states that rollback then requires reactivation |
 
 - Audit intent and a duplicate-prevention key are stored before any GitHub
   write. Reservations, claims and the `write` lock use one Azure Table partition

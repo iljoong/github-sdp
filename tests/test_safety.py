@@ -1050,8 +1050,8 @@ class SafetyTests(unittest.TestCase):
         self.assertIn("check_source.py", demo_retire)
         self.assertIn("scripts/retire.py", demo_retire)
         self.assertNotIn("[all,", demo_retire)
-        self.assertIn("needs: korea", release)
-        self.assertIn("needs: southeastasia", release)
+        self.assertIn("needs: [promote, korea]", release)
+        self.assertIn("needs: [promote, southeastasia]", release)
         self.assertNotIn("matrix:", release)
 
     def test_korea_only_release_reuses_build_and_stops_after_korea(self):

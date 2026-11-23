@@ -191,7 +191,7 @@ resource consoleAuth 'Microsoft.App/containerApps/authConfigs@2024-03-01' = {
           openIdIssuer: '${environment().authentication.loginEndpoint}${tenantId}/v2.0'
         }
         validation: { allowedAudiences: [entraClientId] }
-        login: { loginParameters: ['scope=openid profile'] }
+        login: { loginParameters: ['scope=openid profile offline_access'] }
       }
     }
     login: {

@@ -7,7 +7,8 @@ with the inbox count badge and URL tab), approval inbox across regions + tab-tit
 health/step/traffic-stage badges, per-source freshness, stream update, active-release polling with the stream open,
 idle slow poll, inbox truncation note, polling fallback, Live/Pause/refresh, deep link + back button,
 incremental render preserving open sections, scroll and the release list, resource tree, events timeline,
-reject-only re-run gate with re-run badges, release history with per-entry actions, typed-region confirmation, keyboard shortcuts, dark theme, mobile width.
+reject-only re-run gate with re-run badges, release history with per-entry actions, typed-region confirmation, keyboard shortcuts, dark theme, mobile width,
+and Entra ID token expiry (background renewal through stubbed /.auth/refresh, no write replay, sign-in fallback).
 The fixture server logs one ConnectionAbortedError traceback when the smoke deliberately breaks the stream.
 """
 import argparse
@@ -154,6 +155,13 @@ class Fixture:
 
 def check(name):
     print(f"ok - {name}", flush=True)
+
+
+def eventually(predicate, failure, timeout=10):
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline, failure
+        time.sleep(0.1)
 
 
 def run(fixture, headed, screenshot=None):
@@ -585,6 +593,94 @@ def run(fixture, headed, screenshot=None):
             browser.close()
 
 
+def run_session_expiry(fx, headed):
+    """The Entra ID token expires while the console stays open (Easy Auth keeps its session cookie)."""
+    fx.call("POST", "/__fixture/stream", {"enabled": True})
+    fx.call("PUT", "/__fixture/snapshot", snapshot())
+    fx.call("POST", "/__fixture/session", {"expired": False, "refresh": "renew"})
+    with sync_playwright() as play:
+        browser = play.chromium.launch(channel="msedge", headless=not headed)
+        context = browser.new_context(viewport={"width": 1100, "height": 650}, base_url=fx.origin,
+                                      extra_http_headers={"x-ms-client-principal": principal("ReleaseOperator", "ReleaseApprover"),
+                                                          "x-ms-token-aad-id-token": "fixture"})
+        page = context.new_page()
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        here = f"{fx.origin}/?run=501&region=sea"
+        message = page.locator("#message")
+        try:
+            page.goto("/?run=501&region=sea")
+            expect(message).to_contain_text("최근 조회")
+            reads = len(fx.call("GET", "/__fixture/requests"))
+            fx.call("POST", "/__fixture/session", {"expired": True, "refresh": "renew"})
+            page.locator("#refresh").click()
+            eventually(lambda: len(fx.call("GET", "/__fixture/requests")) > reads, "snapshot was not re-read after renewal")
+            expect(message).to_contain_text("최근 조회")
+            assert fx.call("GET", "/__fixture/auth") == {"refreshes": 1, "logins": []}, fx.call("GET", "/__fixture/auth")
+            expect(page).to_have_url(here)
+            check("expired ID token is renewed in the background and the snapshot read is retried")
+
+            reviews = len(fx.call("GET", "/__fixture/reviews"))
+            fx.call("POST", "/__fixture/session", {"expired": True, "refresh": "renew"})
+            page.locator("#tab-inbox").click()
+            page.locator("#inbox-list > li").filter(has_text="prod-usw").get_by_role("button", name="승인", exact=True).click()
+            page.locator("dialog#confirm").get_by_role("button", name="확인", exact=True).click()
+            expect(message).to_contain_text("다시 요청하세요")
+            page.wait_for_timeout(1000)
+            expect(message).to_contain_text("다시 요청하세요")
+            assert len(fx.call("GET", "/__fixture/reviews")) == reviews, "an approval was replayed after renewal"
+            assert fx.call("GET", "/__fixture/auth") == {"refreshes": 2, "logins": []}
+            check("a write rejected for expiry renews the session but is not replayed")
+            page.locator("#tab-overview").click()
+            expect(page).to_have_url(here)
+
+            fx.call("POST", "/__fixture/session", {"expired": True, "refresh": "noop"})
+            page.locator("#tab-inbox").click()
+            page.locator("#inbox-list > li").filter(has_text="prod-usw").get_by_role("button", name="승인", exact=True).click()
+            with page.expect_navigation(url=f"{here}&tab=inbox"):
+                page.locator("dialog#confirm").get_by_role("button", name="확인", exact=True).click()
+            assert len(fx.call("GET", "/__fixture/reviews")) == reviews, "an approval was replayed after renewal"
+            inbox = "/?run=501&region=sea&tab=inbox"
+            assert fx.call("GET", "/__fixture/auth") == {"refreshes": 3, "logins": [inbox]}
+            check("a write whose renewal leaves the token expired signs in after a single renewal")
+            page.locator("#tab-overview").click()
+            expect(page).to_have_url(here)
+
+            fx.call("POST", "/__fixture/session", {"expired": True, "refresh": "fail"})
+            page.evaluate("""() => {
+              Object.defineProperty(document, "hidden", {configurable: true, get: () => true});
+              document.dispatchEvent(new Event("visibilitychange"));
+            }""")
+            page.wait_for_timeout(6000)
+            assert fx.call("GET", "/__fixture/auth") == {"refreshes": 3, "logins": [inbox]}, "a hidden tab renewed the session"
+            with page.expect_navigation(url=here):
+                page.evaluate("""() => {
+                  delete document.hidden;
+                  document.dispatchEvent(new Event("visibilitychange"));
+                }""")
+            expect(message).to_contain_text("최근 조회")
+            assert fx.call("GET", "/__fixture/auth") == {"refreshes": 4, "logins": [inbox, "/?run=501&region=sea"]}
+            check("a hidden tab waits; when shown, a refused renewal signs in again and returns to the same view")
+
+            fx.call("POST", "/__fixture/session", {"expired": True, "refresh": "noop"})
+            with page.expect_navigation(url=here):
+                page.locator("#refresh").click()
+            expect(message).to_contain_text("최근 조회")
+            auth = fx.call("GET", "/__fixture/auth")
+            assert auth == {"refreshes": 5, "logins": [inbox] + ["/?run=501&region=sea"] * 2}, auth
+            check("a renewal that leaves the token expired signs in once instead of looping")
+
+            fx.call("POST", "/__fixture/session", {"expired": True, "refresh": "renew"})
+            page.reload()
+            expect(page).to_have_url(here)
+            expect(message).to_contain_text("최근 조회")
+            assert fx.call("GET", "/__fixture/auth")["logins"] == [inbox] + ["/?run=501&region=sea"] * 3
+            check("reloading with an expired ID token signs in again instead of showing JSON")
+            assert not errors, errors
+        finally:
+            browser.close()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--server-python", default=sys.executable)
@@ -595,6 +691,7 @@ def main():
     fixture = Fixture(args.server_python)
     try:
         run(fixture, args.headed, args.screenshot)
+        run_session_expiry(fixture, args.headed)
     finally:
         fixture.close()
     print("UI smoke passed")

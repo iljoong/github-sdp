@@ -8,7 +8,7 @@ from xml.etree import ElementTree
 
 from fastapi.testclient import TestClient
 
-from dashboard.auth import APPROVER, Actor, OPERATOR
+from dashboard.auth import APPROVER, Actor, OPERATOR, SessionExpired
 from dashboard.github import RemoteError
 from dashboard.server import create_app
 from test_dashboard_auth_github import TENANT, USER, principal
@@ -150,3 +150,52 @@ class DashboardHTTPTests(unittest.TestCase):
         }, json={"action": "deploy", "request_id": "83468040-d438-4007-bf2d-8068282a966d", "profile": "demo"})
         self.assertEqual(response.status_code, 503)
         self.assertIn("verify", response.json()["detail"].lower())
+
+    def expire_sessions(self):
+        operator = Actor(TENANT, USER, frozenset({OPERATOR}))
+
+        def verify(token):
+            if token == "expired-fixture":
+                raise SessionExpired(operator)
+            return operator if token == "valid-fixture" else None
+
+        self.client.app.state.verify_session = verify
+        return {**self.headers, "x-ms-token-aad-id-token": "expired-fixture"}
+
+    def test_expired_session_is_reported_as_renewable_and_writes_are_not_applied(self):
+        expired = self.expire_sessions()
+        commands = []
+        self.client.app.state.operations.request = lambda actor, command: commands.append(command) or {}
+        self.client.app.state.operations.review = lambda *args: commands.append(args) or {}
+        write = {**expired, "origin": "https://console.example.test", "x-dashboard-write": "1"}
+        command = {"action": "deploy", "request_id": "83468040-d438-4007-bf2d-8068282a966d", "profile": "demo"}
+        for response in (self.client.get("/api/dashboard", headers=expired),
+                         self.client.get("/assets/dashboard.js", headers=expired),
+                         self.client.get("/api/changes", headers=expired),
+                         self.client.post("/api/operations", json=command, headers=write),
+                         self.client.post("/api/operations/op-1/review", json={"environment": "prod-kr", "approved": True},
+                                          headers=write)):
+            with self.subTest(response.request.url.path):
+                self.assertEqual(response.status_code, 401)
+                self.assertEqual(response.json(), {"detail": "Entra session expired"})
+        self.assertEqual(commands, [])
+
+    def test_reloading_the_console_with_an_expired_session_signs_in_again_and_returns(self):
+        expired = self.expire_sessions()
+        response = self.client.get("/?run=34&region=sea", headers=expired, follow_redirects=False)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        login = urlsplit(response.headers["location"])
+        self.assertEqual((login.scheme, login.netloc, login.path), ("", "", "/.auth/login/aad"))
+        self.assertEqual(parse_qs(login.query), {"post_login_redirect_uri": ["/?run=34&region=sea"]})
+        plain = urlsplit(self.client.get("/", headers=expired, follow_redirects=False).headers["location"])
+        self.assertEqual(parse_qs(plain.query), {"post_login_redirect_uri": ["/"]})
+
+    def test_expired_session_does_not_override_other_session_failures(self):
+        expired = self.expire_sessions()
+        no_principal = {"x-ms-token-aad-id-token": "expired-fixture"}
+        other_user = {**expired, "x-ms-client-principal": principal(OPERATOR, user=TENANT)}
+        unassigned = {**expired, "x-ms-client-principal": principal()}
+        for name, headers in (("no principal", no_principal), ("other user", other_user), ("unassigned", unassigned)):
+            with self.subTest(name):
+                self.assertEqual(self.client.get("/api/dashboard", headers=headers).status_code, 403)

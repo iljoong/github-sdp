@@ -8,6 +8,9 @@ Fixture controls (unauthenticated, fixture only):
   GET  /__fixture/requests   /api/dashboard calls so far as [{"run_id", "region"}]
   GET  /__fixture/writes     POST /api/operations commands so far as [{"action", "source_run_id", "region"}]
   GET  /__fixture/reviews    review decisions so far as [{"operation_id", "environment", "approved"}]
+  POST /__fixture/session    {"expired": bool, "refresh": "renew"|"noop"|"fail"} expire the Entra session and choose
+                             how the stubbed /.auth/refresh answers (renew it, succeed without renewing, or refuse)
+  GET  /__fixture/auth       {"refreshes": n, "logins": [post_login_redirect_uri, ...]} seen by the Easy Auth stubs
 """
 import copy
 import sys
@@ -18,9 +21,9 @@ sys.path[:0] = [str(Path(__file__).resolve().parents[2]), str(Path(__file__).res
 
 import uvicorn
 from fastapi import Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
-from dashboard.auth import APPROVER, Actor, OPERATOR
+from dashboard.auth import APPROVER, Actor, OPERATOR, SessionExpired
 from dashboard.server import create_app
 from test_dashboard_auth_github import TENANT, USER
 
@@ -41,11 +44,20 @@ class Feed:
 def fixture_app(port):
     app = create_app()
     state = {"snapshot": None, "requests": [], "writes": [], "reviews": []}
+    session = {"expired": False, "refresh": "renew", "refreshes": 0, "logins": []}
     feed = Feed()
     app.state.settings = SimpleNamespace(tenant_id=TENANT, origin=f"http://127.0.0.1:{port}")
-    app.state.verify_session = lambda token: Actor(
-        TENANT, USER, frozenset({OPERATOR, APPROVER}), display_name="Fixture Operator",
-        username="fixture.op@example.test") if token == "fixture" else None
+    operator = Actor(TENANT, USER, frozenset({OPERATOR, APPROVER}), display_name="Fixture Operator",
+                     username="fixture.op@example.test")
+
+    def verify_session(token):
+        if token != "fixture":
+            return None
+        if session["expired"]:
+            raise SessionExpired(operator)
+        return operator
+
+    app.state.verify_session = verify_session
     app.state.changes = feed
     app.state.stream_timing = (0.2, 300.0)
 
@@ -104,6 +116,32 @@ def fixture_app(port):
     @app.get("/__fixture/reviews")
     def reviews():
         return state["reviews"]
+
+    @app.post("/__fixture/session")
+    async def set_session(request: Request):
+        session.update(await request.json())
+        return {"ok": True}
+
+    @app.get("/__fixture/auth")
+    def auth():
+        return {"refreshes": session["refreshes"], "logins": session["logins"]}
+
+    @app.get("/.auth/refresh")
+    def refresh():
+        session["refreshes"] += 1
+        if session["refresh"] == "fail":
+            return JSONResponse({}, 403)
+        if session["refresh"] == "renew":
+            session["expired"] = False
+        return {}
+
+    @app.get("/.auth/login/aad")
+    def login(post_login_redirect_uri: str = "/"):
+        # Stands in for a silent Entra SSO sign-in that issues a fresh ID token.
+        session["logins"].append(post_login_redirect_uri)
+        session["expired"] = False
+        return RedirectResponse(post_login_redirect_uri if post_login_redirect_uri.startswith("/")
+                                and not post_login_redirect_uri.startswith("//") else "/", 302)
 
     return app
 

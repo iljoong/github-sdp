@@ -15,6 +15,14 @@ class Denied(Exception):
     pass
 
 
+class SessionExpired(Denied):
+    """An otherwise valid Entra session whose ID token has expired; the platform can renew it."""
+
+    def __init__(self, actor):
+        super().__init__("Entra session expired")
+        self.actor = actor
+
+
 @dataclass(frozen=True)
 class Actor:
     tenant_id: str
@@ -67,6 +75,8 @@ def verify_write_origin(headers, origin: str) -> None:
 
 
 class EntraSession:
+    LEEWAY = 30
+
     def __init__(self, tenant_id, audience):
         from jwt import PyJWKClient
 
@@ -75,23 +85,32 @@ class EntraSession:
         self.keys = PyJWKClient(f"https://login.microsoftonline.com/{tenant_id}/discovery/v2.0/keys", timeout=5)
 
     def __call__(self, token):
+        import time
+
         import jwt
 
         if not token or len(token) > 32768:
             raise Denied("Sign in with Microsoft Entra")
         try:
             key = self.keys.get_signing_key_from_jwt(token).key
+            # Expiry is checked last so that only an otherwise valid session is reported as renewable.
             claims = jwt.decode(token, key, algorithms=["RS256"], audience=self.audience, issuer=self.issuer,
                                 options={"require": ["iss", "aud", "exp", "nbf", "iat", "tid", "oid"],
-                                         "strict_aud": True}, leeway=30)
+                                         "strict_aud": True, "verify_exp": False}, leeway=self.LEEWAY)
             if claims.get("scp") or not isinstance(claims.get("roles"), list):
                 raise ValueError
             actor = actor_from_principal(base64.b64encode(json.dumps({"claims": [
                 {"typ": name, "val": value} for name, value in claims.items()
                 if name in ("tid", "oid", "idtyp", "preferred_username", "upn")
             ] + [{"typ": "roles", "val": role} for role in claims["roles"]]}).encode()).decode(), self.tenant_id)
+            expires = claims["exp"]
+            if isinstance(expires, bool) or not isinstance(expires, (int, float)):
+                raise ValueError
             name = next((value.strip() for key in ("name", "preferred_username", "upn")
                          if isinstance(value := claims.get(key), str) and value.strip()), "")
-            return replace(actor, display_name=name)
         except (jwt.PyJWTError, ValueError, TypeError):
             raise Denied("A valid Entra session is required") from None
+        actor = replace(actor, display_name=name)
+        if expires <= time.time() - self.LEEWAY:
+            raise SessionExpired(actor)
+        return actor

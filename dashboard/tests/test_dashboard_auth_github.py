@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import jwt
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from dashboard.auth import Denied, EntraSession, actor_from_principal, authorize, verify_write_origin
+from dashboard.auth import Denied, EntraSession, SessionExpired, actor_from_principal, authorize, verify_write_origin
 from dashboard.github import GitHub, ReadCache, RemoteError, Tokens
 
 
@@ -65,6 +65,32 @@ class AuthTests(unittest.TestCase):
         for override in ({"aud": "other-client"}, {"tid": USER}, {"exp": now - 60}):
             with self.assertRaises(Denied):
                 verifier(jwt.encode({**claims, **override}, private_key, algorithm="RS256"))
+
+    def test_only_an_otherwise_valid_expired_session_is_reported_as_expired(self):
+        private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        verifier = EntraSession(TENANT, "console-client")
+        verifier.keys = SimpleNamespace(get_signing_key_from_jwt=lambda _: SimpleNamespace(key=private_key.public_key()))
+        now = int(time.time())
+        claims = {"iss": f"https://login.microsoftonline.com/{TENANT}/v2.0", "aud": "console-client",
+                  "iat": now - 4000, "nbf": now - 4000, "exp": now - 600, "tid": TENANT, "oid": USER,
+                  "roles": ["ReleaseOperator"], "preferred_username": "operator@example.test"}
+        with self.assertRaises(SessionExpired):
+            verifier(jwt.encode(claims, private_key, algorithm="RS256"))
+        self.assertEqual(verifier(jwt.encode({**claims, "exp": now - 10}, private_key, algorithm="RS256")).object_id,
+                         USER)
+        other_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        for name, token in (
+            ("audience", jwt.encode({**claims, "aud": "other-client"}, private_key, algorithm="RS256")),
+            ("issuer", jwt.encode({**claims, "iss": "https://login.microsoftonline.com/other/v2.0"}, private_key,
+                                  algorithm="RS256")),
+            ("tenant", jwt.encode({**claims, "tid": USER}, private_key, algorithm="RS256")),
+            ("delegated", jwt.encode({**claims, "scp": "read"}, private_key, algorithm="RS256")),
+            ("roles", jwt.encode({k: v for k, v in claims.items() if k != "roles"}, private_key, algorithm="RS256")),
+            ("signature", jwt.encode(claims, other_key, algorithm="RS256")),
+        ):
+            with self.subTest(name), self.assertRaises(Denied) as raised:
+                verifier(token)
+            self.assertNotIsInstance(raised.exception, SessionExpired)
 
 
 class GitHubTests(unittest.TestCase):

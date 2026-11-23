@@ -84,7 +84,7 @@ const tabs = [...document.querySelectorAll("[role=tab]")];
 
 let selected = "kr", seq = 0, selectedRun = "", timer, soonTimer, writing = false, callback, tab = "overview";
 let data = null, receivedAt = 0, errors = 0, live = true, stream = null, streamOpen = false, streamOpened = false;
-let streamRetryAt = 0, nextPollAt = 0, seenInbox = null, typedRegion = null;
+let streamRetryAt = 0, nextPollAt = 0, seenInbox = null, typedRegion = null, renewal = null, renewedAt = 0, signingIn = false;
 const decided = new Map();
 const signatures = new WeakMap();
 
@@ -645,6 +645,8 @@ function openStream() {
     if (source.readyState === EventSource.CLOSED && stream === source) {
       stream = null;
       streamRetryAt = Date.now() + POLL.retryStream;
+      // A refused reconnect may be an expired session; a snapshot read tells, and renews it if so.
+      soon();
     }
     schedule();
   };
@@ -659,6 +661,42 @@ function closeStream() {
 function soon() {
   clearTimeout(soonTimer);
   soonTimer = setTimeout(() => refresh(), 250);
+}
+
+// The server answers 401 only when the Entra ID token has expired for the signed-in user. Easy Auth renews it from
+// its stored refresh token; concurrent callers share one renewal.
+function renewSession() {
+  renewal ??= fetch("/.auth/refresh", {cache: "no-store"}).then(response => response.ok, () => false)
+    .then(ok => { if (ok) renewedAt = Date.now(); return ok; })
+    .finally(() => { renewal = null; });
+  return renewal;
+}
+
+function signIn() {
+  if (signingIn) return;
+  signingIn = true;
+  setStatus("세션이 만료되어 다시 로그인합니다.");
+  disableActions();
+  location.assign("/.auth/login/aad?" + new URLSearchParams({post_login_redirect_uri: location.pathname + location.search}));
+}
+
+// Renews once and retries the read once; a read that is still expired, including right after another caller's
+// renewal, signs in again instead of looping.
+async function renewedRead(read) {
+  if (document.hidden) return null;
+  if (Date.now() - renewedAt < 10000) {
+    signIn();
+    return null;
+  }
+  setStatus("세션을 갱신하는 중입니다.");
+  disableActions();
+  const response = await renewSession() ? await read() : null;
+  if (response && response.status !== 401) {
+    streamRetryAt = 0;
+    return response;
+  }
+  signIn();
+  return null;
 }
 
 // Reused command nodes keep whatever a previous lock set, so re-derive enabled state after each render.
@@ -676,6 +714,7 @@ function disableActions() {
 async function refresh(clearMessage = true, selectionChanged = false) {
   clearTimeout(timer);
   clearTimeout(soonTimer);
+  if (signingIn) return;
   if (selectionChanged) {
     disableActions();
     $("regional").replaceChildren(node("p", "선택한 지역을 조회하는 중입니다."));
@@ -684,7 +723,11 @@ async function refresh(clearMessage = true, selectionChanged = false) {
   const query = new URLSearchParams({region: selected});
   if (selectedRun) query.set("run_id", selectedRun);
   try {
-    const response = await fetch(`/api/dashboard?${query}`, {cache: "no-store"});
+    const read = () => fetch(`/api/dashboard?${query}`, {cache: "no-store"});
+    let response = await read();
+    if (response.status === 401) response = await renewedRead(read);
+    // Hidden tabs renew when shown again; a failed renewal is already signing in.
+    if (!response || id !== seq) return;
     if (!response.ok || response.redirected) throw new Error("unavailable");
     const snapshot = await response.json();
     if (id !== seq) return;
@@ -775,6 +818,12 @@ async function submit(kind, runId, region, gate) {
       headers: {"Content-Type": "application/json", "X-Dashboard-Write": "1"},
       body: JSON.stringify(body)
     });
+    // The write was refused before it was applied; renew, but let the user decide to send it again.
+    if (response.status === 401) {
+      if (await renewSession()) setStatus(`세션을 갱신했습니다. ${labels[kind]} 요청은 처리되지 않았으니 다시 요청하세요.`);
+      else signIn();
+      return;
+    }
     const result = await response.json().catch(() => ({}));
     // An accepted decision leaves the inbox at once, even while GitHub still reports the gate as waiting.
     if (gate && response.ok && result.status === "accepted") decided.set(gateKey(gate), Date.now() + 120000);

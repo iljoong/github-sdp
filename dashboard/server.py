@@ -11,11 +11,11 @@ from urllib.parse import urlencode
 from azure.core.exceptions import AzureError
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 from starlette.concurrency import run_in_threadpool
 
-from .auth import APPROVER, OPERATOR, Denied, EntraSession, actor_from_principal, verify_write_origin
+from .auth import APPROVER, OPERATOR, Denied, EntraSession, SessionExpired, actor_from_principal, verify_write_origin
 from .changes import ChangeFeed
 from .config import Settings, positive
 from .evidence import Evidence
@@ -96,7 +96,13 @@ def create_app():
     def actor(request, write=False):
         settings = app.state.settings
         user = actor_from_principal(request.headers.get("x-ms-client-principal"), settings.tenant_id)
-        session = app.state.verify_session(request.headers.get("x-ms-token-aad-id-token"))
+        try:
+            session = app.state.verify_session(request.headers.get("x-ms-token-aad-id-token"))
+        except SessionExpired as expired:
+            # Only offer renewal when the expired token belongs to the signed-in platform user.
+            if user != expired.actor:
+                raise Denied("A valid Entra session is required") from None
+            raise
         if user != session:
             raise Denied("A valid Entra session is required")
         if write:
@@ -119,6 +125,7 @@ def create_app():
             return JSONResponse({"detail": message or str(exc)}, status)
         return handler
 
+    app.add_exception_handler(SessionExpired, error_handler(401))
     app.add_exception_handler(Denied, error_handler(403))
     app.add_exception_handler(Conflict, error_handler(409))
     app.add_exception_handler(InvalidAction, error_handler(422))
@@ -132,7 +139,12 @@ def create_app():
 
     @app.get("/")
     def index(request: Request):
-        user = actor(request)
+        try:
+            user = actor(request)
+        except SessionExpired:
+            # A reload after the ID token expired signs in again and returns to the same view.
+            back = "/" + (f"?{request.url.query}" if request.url.query else "")
+            return RedirectResponse("/.auth/login/aad?" + urlencode({"post_login_redirect_uri": back}), 302)
         roles = [SHORT_ROLES.get(role, role) for role in sorted(user.roles)]
         name = user.display_name or "이름 없는 계정"
         alias = user.username.split("@", 1)[0] or (user.display_name.split() or ["계정"])[0]

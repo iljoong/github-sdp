@@ -12,7 +12,7 @@ from azure.core.exceptions import AzureError
 from .auth import APPROVER, OPERATOR
 from .config import REGIONS, positive
 from .github import RemoteError
-from .operations import InvalidAction, WORKFLOW, review_claim
+from .operations import RERUN_REASON, InvalidAction, WORKFLOW, review_claim
 from .store import stamp
 
 ARM = "https://management.azure.com"
@@ -66,8 +66,9 @@ def job_states(jobs, kind, region=None):
     elif kind == "rollback":
         names = {r: {f"{p} / restore"} for r, p in JOB_PREFIX.items()}
     else:
-        names = {"build": {"build / build", "build"}}
-        names.update({r: {f"{p} / rollout"} for r, p in JOB_PREFIX.items()})
+        names = {"build": {"build / build", "build"}, "promote": {"promote"}}
+        # A skipped reusable-workflow call is listed under its caller job name alone.
+        names.update({r: {f"{p} / rollout", p} for r, p in JOB_PREFIX.items()})
     result = {}
     for key, matching in names.items():
         rows = [job for job in jobs if job.get("name", "").strip().lower() in matching]
@@ -76,6 +77,11 @@ def job_states(jobs, kind, region=None):
             result[key] = ((rows[0].get("conclusion") or "unknown") if rows[0].get("status") == "completed"
                            else (rows[0].get("status") or "unknown"))
     return result
+
+
+def _attempt(value):
+    """A GitHub run_attempt as a positive int, or None when absent or malformed."""
+    return value if type(value) is int and value >= 1 else None
 
 
 def _single_job(jobs, region):
@@ -230,11 +236,13 @@ def source(now, observed, stale_after, reason=None):
 
 class DashboardReader:
     def __init__(self, shared, targets, github, evidence, inbox, store, azure=None, cache=None, clock=time.time,
-                 stale_after=15):
+                 stale_after=15, hints=None, hint_after=900):
         self.shared, self.targets, self.github = shared, targets, github
         self.evidence, self.inbox, self.store, self.azure = evidence, inbox, store, azure
         # cache: the display ReadCache (observation ages and rate-limit back-off); None for uncached readers.
         self.cache, self.clock, self.stale_after = cache, clock, stale_after
+        # hints: the ChangeFeed (started_at, last_hint_at); None leaves the hints source out of the snapshot.
+        self.hints, self.hint_after = hints, hint_after
 
     def _run_matches(self, run, run_id, workflow):
         path = f".github/workflows/{workflow}"
@@ -243,26 +251,37 @@ class DashboardReader:
                 and (run.get("repository") or {}).get("id") == self.shared.repo_id)
 
     def gate(self, operation, env):
+        """The waiting gate {"attempt", "rerun"} of the run's current attempt, or None.
+
+        A gate on attempt > 1 of a deploy run is a re-run gate: GitHub re-runs are forbidden, so it may only be rejected.
+        """
         run_id = operation["run_id"]
         workflow = WORKFLOW.get(operation["kind"])
         if workflow is None:
-            return False
+            return None
         region = env.rsplit("-", 1)[-1]
         expected = f"prod-rollback-{region}" if operation["kind"] == "rollback" else f"prod-{region}"
         if env != expected or (operation["kind"] != "deploy" and operation.get("region") != region):
-            return False
+            return None
         run = self.github.run(run_id)
-        if (not self._run_matches(run, run_id, workflow) or run.get("run_attempt") != 1
-                or run.get("status") == "completed"):
-            return False
-        return self._waiting_gate(operation, env, run)
+        attempt = _attempt(run.get("run_attempt"))
+        if (not self._run_matches(run, run_id, workflow) or attempt is None
+                or (attempt != 1 and operation["kind"] != "deploy") or run.get("status") == "completed"):
+            return None
+        return {"attempt": attempt, "rerun": attempt > 1} if self._waiting_gate(operation, env, run) else None
 
     def _waiting_gate(self, operation, env, run):
         region = env.rsplit("-", 1)[-1]
-        rows = self.inbox.rules(run["id"])
-        if not any(row["environment"] == env and row["sha"] == run["head_sha"] for row in rows):
+        attempt = run["run_attempt"]
+        # Rule rows are keyed by run only; on a re-run, a row from an earlier attempt must not open this one.
+        started = _epoch(run.get("run_started_at")) if attempt > 1 else None
+        if attempt > 1 and started is None:
             return False
-        jobs = self.github.jobs(run["id"], 1)
+        rows = self.inbox.rules(run["id"])
+        if not any(row["environment"] == env and row["sha"] == run["head_sha"]
+                   and (started is None or (_epoch(row.get("received_at")) or 0) >= started) for row in rows):
+            return False
+        jobs = self.github.jobs(run["id"], attempt)
         # A custom-rule request can exist before a runner starts. Refuse states
         # known to be running or completed; use the signed rule request for the gate.
         return job_states(jobs, operation["kind"], operation.get("region")).get(region) in {"waiting", "pending"}
@@ -290,8 +309,8 @@ class DashboardReader:
         return data if data and data.get("revision") == baseline["candidate"] else {}
 
     def recovery(self, command, run, baseline, azure, fresh=False):
-        if run.get("status") != "completed" or run.get("run_attempt") != 1:
-            return "The original release must be completed on its first attempt"
+        if run.get("status") != "completed":
+            return "The original release must be completed"
         if not baseline:
             return "The deployment baseline is unavailable, expired or unverified"
         rows = {r["name"]: r for r in azure.get("revisions", [])}
@@ -309,7 +328,67 @@ class DashboardReader:
             return "Retire requires verified demo evidence and candidate traffic at 100%"
         if rows.get(baseline["candidate"], {}).get("health") != "Healthy":
             return "The candidate is not verified healthy"
+        if self._rerun_rollout(run, azure["region"]):
+            return "A later attempt of this release ran the region's rollout"
         return None
+
+    def _rerun_rollout(self, run, region):
+        """Whether any attempt after the first started the region's rollout job (unknown states count as started)."""
+        attempts = _attempt(run.get("run_attempt"))
+        if attempts is None:
+            return True
+        for attempt in range(2, attempts + 1):
+            for job in self.github.jobs(run["id"], attempt):
+                if (job.get("name", "").strip().lower() != f"{JOB_PREFIX[region]} / rollout"
+                        or job.get("run_attempt", attempt) != attempt):
+                    continue
+                status, conclusion = job.get("status"), job.get("conclusion")
+                if status in {"queued", "waiting", "pending", "requested"}:
+                    continue
+                if status == "completed" and (conclusion == "skipped" or (conclusion == "cancelled" and not job.get("steps"))):
+                    continue
+                return True
+        return False
+
+    def _resume(self, run, origin, jobs, observe, fresh=False):
+        """(reason, plan) for resuming a completed release from its first region not successful in the latest attempt.
+
+        `origin` is the source's audit row (or None); `observe(region, baseline)` returns the region's detailed
+        Azure observation. The plan holds the start region and the source's profile (default production).
+        """
+        if run.get("status") != "completed":
+            return "The original release must be completed", None
+        if run.get("conclusion") not in ("failure", "cancelled"):
+            return "Only a failed or cancelled release can be resumed", None
+        states = job_states(jobs, "deploy")
+        # A resume source skipped build and the regions before its start region; those count as done by the
+        # release it resumed (promote_source.py applies the same rule), so only regions from the first it ran count.
+        if states["build"] == "success":
+            first = 0
+        elif states["build"] == "skipped" and states["promote"] == "success":
+            first = next((index for index, region in enumerate(REGIONS) if states[region] != "skipped"), None)
+            if first is None:
+                return "The source release did not deploy any region", None
+        else:
+            return "The source release did not build an image", None
+        start = next((region for region in REGIONS[first:] if states[region] != "success"), None)
+        if start is None:
+            return "Every region already succeeded", None
+        later = REGIONS[REGIONS.index(start) + 1:]
+        if states[start] == "unknown" or any(states[r] not in ("not_started", "skipped", "cancelled") for r in later):
+            return "An earlier region did not succeed in the latest attempt", None
+        baseline = self.baseline(run, start, fresh=fresh)
+        azure = observe(start, baseline)
+        live = [name for name, weight in azure.get("traffic", {}).items() if weight]
+        rows = {row["name"]: row for row in azure.get("revisions") or ()}
+        if (len(live) != 1 or azure["traffic"][live[0]] != 100 or rows.get(live[0], {}).get("active") is not True
+                or rows[live[0]].get("health") != "Healthy"):
+            return "The start region's traffic is not on exactly one healthy revision at 100%", None
+        # Without a captured baseline (region never snapshotted) the live revision becomes the new run's baseline.
+        if baseline and live[0] not in (baseline["stable"], baseline["candidate"]):
+            return "Current traffic belongs to a different release", None
+        profile = (origin or {}).get("profile")
+        return None, {"start_region": start, "profile": profile if profile in ("demo", "production") else "production"}
 
     def _active(self):
         return bool(self.github.active_runs())
@@ -326,8 +405,16 @@ class DashboardReader:
             if run.get("status") == "completed":
                 raise InvalidAction("This release has already completed")
             return
-        if run.get("status") != "completed" or run.get("run_attempt") != 1:
-            raise InvalidAction("The original release must be completed on its first attempt")
+        if command.action == "resume":
+            # Uncached at write time: latest-attempt jobs, audit row, fresh baseline and live Azure detail.
+            reason, plan = self._resume(
+                run, self.store.by_run(run["id"]), self.github.jobs(run["id"], run["run_attempt"]),
+                lambda region, baseline: self.azure.region(self.targets[region], run["id"], True, baseline), fresh=True)
+            if reason:
+                raise InvalidAction(reason)
+            return plan
+        if run.get("status") != "completed":
+            raise InvalidAction("The original release must be completed")
         region = command.region
         # Write-time eligibility never trusts cached evidence.
         baseline = self.baseline(run, region, fresh=True)
@@ -367,8 +454,23 @@ class DashboardReader:
                     sample = revision["sample"]
                     sources[f"runtime:{revision['name']}"] = source(
                         now, _epoch(sample.get("observed_at")) if sample else None, self.stale_after, "not_produced")
+        active = result.pop("_active")
+        if self.hints is not None:
+            sources["hints"] = self._hints_source(now, active)
         result["sources"] = sources
         return result
+
+    def _hints_source(self, now, active):
+        """Change hints (webhook workflow_run/workflow_job) are stale only while a run is active and none arrived
+        for `hint_after` seconds since the latest of: the last hint, the newest active run start, the feed start."""
+        last = self.hints.last_hint_at
+        entry = {"observed_at": _iso(last) if last is not None else None,
+                 "age_seconds": int(max(0, now - last)) if last is not None else None, "state": "fresh"}
+        started = [_epoch(run.get("run_started_at") or run.get("created_at")) for run in active]
+        marks = [mark for mark in (last, self.hints.started_at, *started) if mark is not None]
+        if active and marks and now - max(marks) > self.hint_after:
+            entry.update(state="stale", reason="no_hints")
+        return entry
 
     def _github_source(self, now, available, seen):
         backoff = self.cache.backoff_remaining() if self.cache else 0
@@ -403,7 +505,7 @@ class DashboardReader:
                 states = job_states(jobs, "deploy")
                 progress = job_progress(jobs, self.shared.repo, run["id"], now)
                 # Evidence cannot change any action until the source run completes.
-                if run.get("run_attempt") == 1 and run.get("status") == "completed":
+                if run.get("status") == "completed":
                     baseline = self.baseline(run, region)
             active_runs = self.github.active_runs()
         except SOURCE_ERRORS:
@@ -469,6 +571,8 @@ class DashboardReader:
                 return "A protected workflow is still active"
             return None
 
+        resume = {}
+
         def eligible(action):
             if action == "deploy":
                 return None
@@ -478,11 +582,21 @@ class DashboardReader:
             if not run:
                 return "Select an original completed release"
             try:
+                if action == "resume":
+                    def observe(name, verified):
+                        if name == region and not regions[name].get("unavailable"):
+                            return regions[name]
+                        return self.azure.region(self.targets[name], run["id"], True, verified)
+
+                    reason, plan = self._resume(run, current, jobs, observe)
+                    resume.update(plan or {})
+                    return reason
                 return self.recovery(action, run, baseline, {**regions[region], "region": region})
             except SOURCE_ERRORS:
                 return "Recovery evidence is unavailable"
 
-        reasons = {action: blocked(action) or eligible(action) for action in ("deploy", "cancel", "rollback", "retire")}
+        reasons = {action: blocked(action) or eligible(action)
+                   for action in ("deploy", "cancel", "rollback", "retire", "resume")}
         public = ("operation_id", "kind", "status", "created_at", "actor", "actor_name", "source_run_id", "run_id",
                   "environment", "region")
         ops = [*audit, *([current] if current else [])]
@@ -490,9 +604,12 @@ class DashboardReader:
                 "runs": [self._view_run(row) for row in recent[:20]], "regions": regions, "build": states.get("build", "unknown"),
                 "history": self._history(recent[:20], run, ops, reasons, blocked, now),
                 "timeline": self._timeline(run, jobs, ops) if run else [],
-                "pending": pending, "inbox": inbox, "inbox_truncated": inbox_truncated, "actions": reasons, "audit": [{k: row[k] for k in public if k in row} for row in audit],
+                "pending": pending, "inbox": inbox, "inbox_truncated": inbox_truncated, "actions": reasons,
+                "resume_start": resume.get("start_region") if reasons["resume"] is None else None,
+                "audit": [{k: row[k] for k in public if k in row} for row in audit],
                 "restored": restored is True, "retired": retired is True, "observed_at": stamp(),
-                "github_available": gh_available, "audit_available": audit_available, "_audit_read": audit_read}
+                "github_available": gh_available, "audit_available": audit_available, "_audit_read": audit_read,
+                "_active": [*active_runs, *([run] if run and run.get("status") != "completed" else [])]}
 
     def _history(self, rows, selected, ops, reasons, blocked, now):
         """Release history entries; recovery reasons are fully evaluated only for the selected release."""
@@ -509,13 +626,13 @@ class DashboardReader:
             for action in ("rollback", "retire"):
                 if selected and row["id"] == selected["id"]:
                     actions[action] = reasons[action]
-                elif row.get("status") != "completed" or row.get("run_attempt") != 1:
-                    actions[action] = blocked(action) or "The original release must be completed on its first attempt"
+                elif row.get("status") != "completed":
+                    actions[action] = blocked(action) or "The original release must be completed"
                 else:
                     actions[action] = blocked(action) or "Select this release to verify its recovery evidence"
             result.append({**self._view_run(row), "started_at": _iso(start) if start is not None else None,
                            "profile": op.get("profile"), "commit": row.get("head_sha"),
-                           "requester": op.get("actor_name"),
+                           "requester": op.get("actor_name"), "resumed_from": op.get("source_run_id"),
                            "duration_seconds": int(max(0, end - start)) if start is not None and end is not None else None,
                            "actions": actions})
         return result
@@ -524,27 +641,37 @@ class DashboardReader:
         """Bounded, time-ordered merge of job transitions, approval requests and console audit for one run."""
         events = []
 
-        def add(at, kind, name=None, status=None, environment=None, region=None, op=None):
+        def add(at, kind, name=None, status=None, environment=None, region=None, op=None, attempt=None):
             moment = _epoch(at)
             if moment is not None:
                 events.append((moment, {"at": _iso(moment), "kind": kind, "name": name, "status": status,
-                                        "environment": environment, "region": region,
+                                        "environment": environment, "region": region, "attempt": attempt,
                                         "actor": (op or {}).get("actor"), "actor_name": (op or {}).get("actor_name")}))
 
         regions = {prefix: region for region, prefix in JOB_PREFIX.items()}
         for job in jobs:
             name = str(job.get("name", ""))
             region = regions.get(name.split(" / ", 1)[0].strip().lower())
-            add(job.get("started_at"), "job_started", name, region=region)
+            attempt = _attempt(job.get("run_attempt"))
+            add(job.get("started_at"), "job_started", name, region=region, attempt=attempt)
             if job.get("status") == "completed":
-                add(job.get("completed_at"), "job_completed", name, job.get("conclusion"), region=region)
+                add(job.get("completed_at"), "job_completed", name, job.get("conclusion"), region=region,
+                    attempt=attempt)
         try:
             rules = self.inbox.rules(run["id"])
         except SOURCE_ERRORS:
             rules = []
+        current = _attempt(run.get("run_attempt")) or 1
+        started = _epoch(run.get("run_started_at")) if current > 1 else None
         for rule in rules:
             env = rule.get("environment")
-            add(rule.get("received_at"), "approval_requested", environment=env, region=_env_region(env))
+            received = _epoch(rule.get("received_at"))
+            # Rule rows carry no attempt: those since the current attempt started belong to it; earlier ones
+            # are attributable only when exactly one earlier attempt exists.
+            attempt = (current if current == 1 or (started is not None and received is not None and received >= started)
+                       else 1 if current == 2 else None)
+            add(rule.get("received_at"), "approval_requested", environment=env, region=_env_region(env),
+                attempt=attempt)
         seen = set()
         for op in ops:
             if (op.get("operation_id") in seen or op.get("kind") not in KINDS
@@ -552,8 +679,10 @@ class DashboardReader:
                 continue
             seen.add(op.get("operation_id"))
             env = op.get("environment")
+            # Decisions recorded before attempts were tracked always concerned attempt 1.
+            attempt = (op.get("run_attempt") or 1) if op["kind"] in ("approve", "reject") else None
             add(op.get("created_at"), op["kind"], status=op.get("status"), environment=env,
-                region=op.get("region") or _env_region(env), op=op)
+                region=op.get("region") or _env_region(env), op=op, attempt=attempt)
         events.sort(key=lambda event: event[0])
         return [event for _, event in events[-limit:]]
 
@@ -584,12 +713,16 @@ class DashboardReader:
         result = []
         for region in REGIONS if op["kind"] == "deploy" else (op["region"],):
             env = f"prod-{'rollback-' if op['kind'] == 'rollback' else ''}{region}"
-            if self.store.claimed(review_claim(op["run_id"], env)) or not self.gate(op, env):
+            gate = self.gate(op, env)
+            if not gate or self.store.claimed(review_claim(op["run_id"], env, gate["attempt"])):
                 continue
-            reason = ("An unrelated write is unresolved" if unresolved else
-                      "ReleaseApprover role required" if APPROVER not in actor.roles else
-                      "A different Entra approver is required" if actor.object_id == op["actor"] else None)
+            blocked = ("An unrelated write is unresolved" if unresolved else
+                       "ReleaseApprover role required" if APPROVER not in actor.roles else
+                       "A different Entra approver is required" if actor.object_id == op["actor"] else None)
+            # A re-run gate can never be approved; it may still be rejected when nothing else blocks the decision.
             result.append({"operation_id": op["operation_id"], "run_id": op["run_id"], "kind": op["kind"],
-                           "region": region, "environment": env, "reason": reason,
-                           "source_run_id": op.get("source_run_id")})
+                           "region": region, "environment": env,
+                           "reason": blocked or (RERUN_REASON if gate["rerun"] else None),
+                           "source_run_id": op.get("source_run_id"), "run_attempt": gate["attempt"],
+                           "rerun": gate["rerun"], "reject_reason": blocked})
         return result

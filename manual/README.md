@@ -16,7 +16,7 @@
 | 4 | [04-operations-runbook.md](04-operations-runbook.md) | 최초 구성, 릴리스, 모니터링, 복구, 장애 대응 runbook |
 | 5 | [05-zero-downtime-demo.md](05-zero-downtime-demo.md) | 무중단 배포 데모: readiness/SIGTERM drain, `/verify` 화면, 긴 작업, demo retire, 수정 지도 |
 | 6 | [06-zero-downtime-demo-guide.md](06-zero-downtime-demo-guide.md) | 무중단 배포 실습: 사전 점검, 데모 절차, retire 상세, 테스트 방법(화면·폴링·curl·KQL), 실습 교훈 |
-| 7 | [07-deployment-dashboard.md](07-deployment-dashboard.md) | 별도 배포 관제실: Entra 관리자 권한, GitHub App 보호 규칙, 배포 및 전환 |
+| 7 | [07-deployment-dashboard.md](07-deployment-dashboard.md) | 별도 배포 관제실: Entra 관리자 권한, GitHub App 보호 규칙, 배포 및 전환, 실패 지역부터 재개 |
 | 8 | [08-deployment-dashboard-permissions.md](08-deployment-dashboard-permissions.md) | Azure 재구축 권한과 범위, SAS 갱신, 임시 권한 회수 |
 
 ## 한눈에 보는 파이프라인
@@ -64,6 +64,7 @@
 | `scripts\` | 구성(bootstrap/identity), 배포(snapshot/rollout/metrics/demo_load), 검증(check_source/inspect_oidc) 도구 |
 | `tests\` | 안전성/health gate/demo load 단위 테스트 |
 | `docs\spec\` | 단계별 개선 명세 |
+| `docs\adr\` | 아키텍처 결정 기록 (예: GitHub 재실행 금지와 실패 지역부터 재개) |
 
 ## 관련 문서
 

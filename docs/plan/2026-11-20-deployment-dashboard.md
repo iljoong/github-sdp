@@ -2,8 +2,10 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** Tasks 1–6 complete and merged in `1be41b8` (base `608afa1`). Live
-verification items are tracked in the spec's acceptance table, not here.
+**Status:** Tasks 1–6 complete and merged in `1be41b8` (base `608afa1`). Task 7
+(spec #21: re-run gates, rollback after re-run, resume, hint freshness) merged on
+`feat/rerun-resume` via #22–#27. Live verification items are tracked in the
+spec's acceptance table, not here.
 
 **Goal:** Build the approved Entra-only ACA console with the A rollout rail.
 
@@ -29,13 +31,16 @@ Operator setup: [manual 07](../../manual/07-deployment-dashboard.md),
   reviewer impersonation.
 - No modification of existing workflow or application code. No Azure resource
   deployment, GitHub App installation, approval policy change or live mutation
-  under this plan.
+  under this plan. (Task 7 is the exception: it adds resume mode to
+  `release.yml` and `scripts/promote_source.py`; rerun guards are unchanged.)
 - Separately testable modules; injected fakes in tests only. No runtime
   mock-login or dummy credential fallback.
 - Persist operation intent before dispatch or rule approval. Never auto-replay
   ambiguous GitHub writes. HTTP observations are not authoritative inventory.
-- Rollback is regional and completed-source only. Retire is demo-only with
-  explicit evidence. No force cancel, `all` restore, or reactivation.
+- Rollback is regional and completed-source only (any run attempt, attempt-1
+  baseline). Retire is demo-only with explicit attempt-1 evidence. No force
+  cancel, `all` restore, or reactivation. GitHub re-runs never deploy; resume is
+  a new `release.yml` run.
 - Dashboard tests live in `dashboard/tests`, not `tests`: `release.yml` runs the
   stdlib-only `tests` suite and must not pick up FastAPI/Azure dependencies.
 
@@ -180,6 +185,35 @@ Recorded 2026-11-22 during nonproduction integration:
 - The principal `auth_typ` check was removed because ACA did not emit `aad`;
   signature validation and actor matching remain.
 - Account display name and role badges were added to the header.
+
+## 7. Re-run gates, rollback after re-run, resume (spec #21)
+
+**Decision record:** [ADR 0001](../adr/0001-rerun-prohibition-and-region-resume.md).
+
+**Files:** `.github/workflows/release.yml`, `scripts/promote_source.py`,
+`tests/test_release_resume.py`, `tests/test_safety.py`, `dashboard/observations.py`,
+`dashboard/operations.py`, `dashboard/github.py`, `dashboard/changes.py`,
+`dashboard/server.py`, `dashboard/static/*`, dashboard tests and UI fixture/smoke.
+
+- [x] #22 Attempt-aware gates: current-attempt jobs, protection-rule rows
+  received at or after the attempt started, `review_claim(run, env, attempt)`,
+  re-run gate "Re-run blocked — reject only" (approve refused, reject sent),
+  attempt in audit rows, timeline and badges.
+- [x] #23 Rollback allowed for completed re-run releases with a verified
+  attempt-1 baseline; retire also refuses when a later attempt started the
+  region's rollout.
+- [x] #24 `release.yml` resume mode: inputs `resume_from_run_id`/`start_region`,
+  `promote` job (rerun guard, `promote_source.py verify`/`rebind`, upload
+  `release-<run>`), region conditions from the start region, unchanged
+  concurrency group.
+- [x] #25 `hints` freshness source (stale after 15 minutes without hints while a
+  run is active).
+- [x] #26 Console `resume` operation: server-derived start region and profile,
+  eligibility reasons, dispatch, deploy-kind audit row with `source_run_id`,
+  history "resumed from" link, confirmation context.
+- [x] #27 ADR and spec/plan/manual updates.
+- [x] Validate: dashboard suite, `python -m unittest discover -s tests`
+  (includes `test_release_resume.py`), `python -m compileall`, UI smoke.
 
 ## Not covered by this plan
 

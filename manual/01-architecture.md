@@ -7,7 +7,7 @@ SDP는 "변경은 점진적으로, 관찰 가능하게, 언제든 되돌릴 수 
 
 | SDP 원칙 | 구현 방식 | 관련 파일 |
 | --- | --- | --- |
-| 한 번 빌드, 여러 번 배포 | 이미지를 build job에서 1회만 빌드하고 `sha256` digest로 고정 | `release.yml`, `common.image_valid` |
+| 한 번 빌드, 여러 번 배포 | 이미지를 build job에서 1회만 빌드하고 `sha256` digest로 고정. 재개 run은 원본 digest를 재사용(재빌드 없음) | `release.yml`, `common.image_valid`, `promote_source.py` |
 | 점진적 노출(Progressive exposure) | 지역 순차(kr → sea → usw) + 지역 내 카나리(10% → 50% → 100%) | `release.yml`, `rollout.deploy` |
 | 사람의 승인 게이트 | 지역별 GitHub Environment required reviewer | `region.yml` `environment:` |
 | 관찰 기반 승격(Bake + health gate) | 단계별 bake 시간 동안 Log Analytics SLI 평가 | `rollout.bake`, `metrics.gate` |
@@ -51,7 +51,8 @@ SDP는 "변경은 점진적으로, 관찰 가능하게, 언제든 되돌릴 수 
 
 candidate 이름이 `<app>--r<GITHUB_RUN_ID>` 로 고정되므로 **어떤 run이 어떤 revision을
 만들었는지(소유권)** 를 항상 검증할 수 있습니다. 같은 이름의 revision이 이미 있으면
-재실행으로 간주하고 중단합니다.
+재실행으로 간주하고 중단합니다. 실패한 지역을 이어서 배포하는 재개(resume)도 새 run ID로
+새 candidate를 만들고 원본 run의 이미지 digest만 재사용합니다.
 
 트래픽 전이:
 
@@ -78,7 +79,10 @@ stable  0 / cand 100  → bake + gate (stable 기준값은 50% 단계에서 고�
 
 추가 원칙:
 
-- **재실행 금지**: `GITHUB_RUN_ATTEMPT != 1` 이면 즉시 중단. 실패 후에는 restore 또는 새 run.
+- **재실행 금지**: `GITHUB_RUN_ATTEMPT != 1` 이면 즉시 중단. GitHub "Re-run"은 배포하지 못합니다.
+  실패 후에는 restore(관제실 롤백), 새 run, 또는 **실패 지역부터 재개**(관제실 Resume =
+  `release.yml` 의 `resume_from_run_id`/`start_region` 입력으로 시작하는 새 run, 원본 이미지 재사용).
+  근거: [ADR 0001](../docs/adr/0001-rerun-prohibition-and-region-resume.md).
 - **동시성 직렬화**: release와 restore가 같은 concurrency group(`safe-aca-production`) 사용.
 - **Mutation intent 기록**: 실제 Azure 변경 직전에 `mutation-intent.json` 기록.
   이 파일이 없으면 cleanup 단계는 Azure를 건드리지 않습니다.

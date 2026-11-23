@@ -7,14 +7,16 @@ from .github import RemoteError
 from .store import Conflict
 
 WORKFLOW = {"deploy": "release.yml", "rollback": "restore.yml", "retire": "demo-retire.yml"}
+RERUN_REASON = "Re-run blocked — reject only"
 
 
 class InvalidAction(Exception):
     pass
 
 
-def review_claim(run_id, environment):
-    return f"review:{run_id}:{environment}"
+def review_claim(run_id, environment, attempt=1):
+    """Decision claim per run attempt; attempt 1 keeps the legacy attempt-less key so existing claims stay valid."""
+    return f"review:{run_id}:{environment}" + (f":{attempt}" if attempt != 1 else "")
 
 
 @dataclass(frozen=True)
@@ -31,9 +33,10 @@ class Command:
                 raise ValueError
             if self.action == "deploy":
                 valid = self.profile in ("demo", "production") and self.source_run_id is None and self.region is None
-            elif self.action in ("rollback", "retire", "cancel"):
+            elif self.action in ("rollback", "retire", "cancel", "resume"):
                 positive(self.source_run_id)
-                valid = self.profile is None and (self.region is None if self.action == "cancel" else self.region in REGIONS)
+                valid = self.profile is None and (self.region is None if self.action in ("cancel", "resume")
+                                                  else self.region in REGIONS)
             else:
                 valid = False
             if not valid:
@@ -49,8 +52,9 @@ class Operations:
     def request(self, actor, command):
         authorize(actor, OPERATOR)
         key = command.request_id
-        row = {"kind": command.action, "actor": actor.object_id, "actor_name": actor.display_name,
-               "tenant": actor.tenant_id}
+        # A resume run is a release: its deploy-kind row makes inbox, history and timeline treat it as one.
+        row = {"kind": "deploy" if command.action == "resume" else command.action, "actor": actor.object_id,
+               "actor_name": actor.display_name, "tenant": actor.tenant_id}
         claim = f"cancel:{command.source_run_id}" if command.action == "cancel" else None
         if claim:
             row["claim"] = claim
@@ -60,7 +64,8 @@ class Operations:
         try:
             if claim and self.store.claimed(claim):
                 raise Conflict("A cancellation was already accepted")
-            self.reader.check(command)
+            # For resume the server derives the start region and profile; the client supplies neither.
+            plan = self.reader.check(command)
         except Exception:
             self.store.finish(key, {"status": "blocked"})
             raise
@@ -69,12 +74,18 @@ class Operations:
             if command.action == "cancel":
                 self.github.cancel(command.source_run_id)
                 return {}
+            if command.action == "resume":
+                inputs = {"profile": plan["profile"], "resume_from_run_id": str(command.source_run_id),
+                          "start_region": plan["start_region"]}
+                return {"run_id": self.github.dispatch(WORKFLOW["deploy"], inputs)}
             inputs = ({"profile": command.profile} if command.action == "deploy" else
                       {"source_run_id": str(command.source_run_id), "region": command.region})
             run_id = self.github.dispatch(WORKFLOW[command.action], inputs)
             return {"run_id": run_id}
 
-        return self._write(key, send, command.source_run_id)
+        record = ({"profile": plan["profile"], "start_region": plan["start_region"]}
+                  if command.action == "resume" else {})
+        return self._write(key, send, command.source_run_id, record)
 
     def review(self, actor, operation_id, environment, approved):
         authorize(actor, APPROVER)
@@ -89,20 +100,25 @@ class Operations:
         if actor.tenant_id != source["tenant"] or source["actor"] == actor.object_id:
             raise Denied("A different Entra approver is required")
         run_id = source["run_id"]
-        claim = review_claim(run_id, environment)
+        gate = self.reader.gate(source, environment)
+        if not gate:
+            raise InvalidAction("The environment is no longer waiting for this approval")
+        if gate["rerun"] and approved:
+            raise InvalidAction(RERUN_REASON)
+        attempt = gate["attempt"]
+        claim = review_claim(run_id, environment, attempt)
         if self.store.claimed(claim):
             raise Conflict("A decision already exists")
-        if not self.reader.gate(source, environment):
-            raise InvalidAction("The environment is no longer waiting for this approval")
         key = str(uuid4())
         self.store.reserve(key, {"kind": "approve" if approved else "reject", "actor": actor.object_id,
                                  "actor_name": actor.display_name,
                                  "tenant": actor.tenant_id, "source_run_id": run_id, "environment": environment,
-                                 "claim": claim})
+                                 "run_attempt": attempt, "claim": claim})
         try:
             if self.store.claimed(claim):
                 raise Conflict("A decision already exists")
-            if not self.reader.gate(source, environment):
+            # The decision must still target the same attempt it was claimed for.
+            if (self.reader.gate(source, environment) or {}).get("attempt") != attempt:
                 raise InvalidAction("The environment is no longer waiting for this approval")
         except Exception:
             self.store.finish(key, {"status": "blocked"})
@@ -114,7 +130,7 @@ class Operations:
 
         return self._write(key, send, run_id)
 
-    def _write(self, key, send, run_id=None):
+    def _write(self, key, send, run_id=None, record=None):
         try:
             result = {"status": "accepted", **send()}
         except RemoteError as error:
@@ -122,6 +138,7 @@ class Operations:
         except Exception:
             # A post-send exception must never lead to an automatic replay.
             result = {"status": "confirmation_required"}
+        result = {**(record or {}), **result}
         # Any write attempt may have changed GitHub state, so cached reads must not hide it.
         self.invalidate(result.get("run_id", run_id))
         self.store.finish(key, result, release=result["status"] != "confirmation_required")

@@ -13,6 +13,7 @@
 | 배포 | `demo_load.py` | `rollout.py` 가 import (demo) | 아니오 | demo 프로필 합성 부하 생성 |
 | 공통 | `common.py` | 위 Python 스크립트가 import | 일부 함수 | Azure CLI 래퍼, guard, 정규화, OIDC 재로그인 |
 | 복구 | `check_source.py` | `restore-region.yml`, `demo-retire.yml` | 아니오 | 복구 대상 원본 run 검증 |
+| 재개 | `promote_source.py` | `release.yml` `promote` job (재개 모드) | 아니오 | 원본 run 검증, 원본 이미지로 새 run의 `release.json` 재게시 |
 | 데모 | `retire.py` | `demo-retire.yml` | **예** (revision 비활성화) | 완료된 release의 이전 revision을 비활성화해 SIGTERM 발생 |
 
 > `.ps1` 과 `.sh` 는 기능이 동일한 쌍입니다. Windows/PowerShell 7 은 `.ps1`,
@@ -27,6 +28,7 @@ rollout.py ──► common.py
 snapshot.py ─► common.py
 inspect_oidc.py ─► common.py
 check_source.py ─► common.py
+promote_source.py ─► common.py
 retire.py ─► common.py, rollout.request
 ```
 
@@ -513,6 +515,44 @@ GitHub REST API로 확인하고, 그 run의 커밋 SHA를 `GITHUB_OUTPUT` 에 `s
 
 ---
 
+## 3.10.2 `promote_source.py` – 재개 run의 원본 검증과 release 기록 재바인딩
+
+### 용도
+
+`release.yml` 재개 모드(`resume_from_run_id` 입력, [2장](02-pipeline-workflows.md#재개-모드-실패-지역부터-이어서-배포))의
+`promote` job에서 실행합니다. GitHub "Re-run" 대신 실패 지역부터 이어서 배포하기 위해, 원본 release run이
+빌드한 이미지를 **재빌드 없이** 새 run의 `release.json` 으로 다시 게시합니다. 새 run은 시도 1이므로
+`snapshot.py`/`rollout.py` 의 재실행 금지 guard가 그대로 적용됩니다. Azure를 변경하지 않습니다.
+근거: [ADR 0001](../docs/adr/0001-rerun-prohibition-and-region-resume.md).
+
+### 사용법과 환경 변수
+
+```text
+python scripts/promote_source.py verify                      # 원본 run 검증, GITHUB_OUTPUT에 sha= 기록
+python scripts/promote_source.py rebind <원본 release.json>  # 작업 디렉터리에 새 release.json 저장
+```
+
+공통 `GITHUB_REPOSITORY`, `SOURCE_RUN_ID`. `verify`: `GH_TOKEN`, `START_REGION`, `GITHUB_RUN_ID`, `GITHUB_OUTPUT`.
+`rebind`: `SOURCE_SHA`(verify 출력), `GITHUB_RUN_ID`, `GITHUB_SHA`, `ACR_NAME`.
+
+### 검증 항목 (fail-closed)
+
+| 단계 | 조건 | 실패 메시지 |
+| --- | --- | --- |
+| verify | 원본 run ID 숫자, 이 run과 다름 | `Source run ID must be numeric`, `Source must be another run` |
+| verify | 같은 저장소, `.github/workflows/release.yml`, `workflow_dispatch`, `main`, `completed` | `Wrong source repository`, `Source must be a release.yml run` 등 |
+| verify | `start_region` 앞 지역의 `<caller> / rollout` job이 원본 최근 시도(`filter=latest`)에서 `success`. 원본이 재개 run(`promote` 성공, `build` skipped)이면 원본이 처음 실행한 지역 앞의 `skipped` 지역도 충족 | `Source region <r> did not succeed in its latest attempt` |
+| rebind | 원본이 재개 run의 기록(`source_run_id` 있음)이면 `build_run_id`(숫자)와 `source_commit` 보유 | `Source release record lacks build provenance` |
+| rebind | 원본 `release.json` 의 repository/run_id/commit이 검증된 원본과 일치 | `Source release record ...` |
+| rebind | 이미지가 `<ACR_NAME>.azurecr.io/safe-demo@sha256:...` digest | `Source image must be an immutable digest`, `Source image is not from the configured registry` |
+
+출력 `release.json`: `image`(원본과 동일), `run_id`/`commit`(이 run), `repository`, `source_run_id`(직전 원본 run),
+`build_run_id`/`source_commit`(이미지를 빌드한 run과 그 commit; 재개의 재개에서도 유지).
+`snapshot.py` 는 이 세 필드를 baseline에, `rollout.py` 는 `success.json` 에 그대로 복사합니다.
+workflow 코드는 현재 `main`, 이미지는 원본 run의 것입니다.
+
+---
+
 ## 3.10.1 `retire.py` – 데모 전용 이전 revision 비활성화
 
 ### 용도
@@ -554,13 +594,14 @@ python scripts/retire.py --snapshot retire-input/baseline-kr.json \
 
 | 메시지 | 의미 | 조치 |
 | --- | --- | --- |
-| `Deploy reruns forbidden` | "Re-run jobs" 사용 | 새 `release.yml` run 시작 |
+| `Deploy reruns forbidden` | "Re-run jobs" 사용 | GitHub Re-run 금지. 관제실 `실패 지역부터 재개` 또는 `release.yml` 재개 입력(`resume_from_run_id`, `start_region`)으로 새 run 시작. 처음부터 다시 하려면 새 `release.yml` run |
+| `Source region <r> did not succeed in its latest attempt` | 재개 시작 지역 앞 지역이 원본에서 성공하지 않음 | `start_region` 을 처음 성공하지 않은 지역으로 지정(관제실은 자동 결정) |
 | `App-scoped drift; manual investigation required` | ingress/identity 등 앱 설정이 snapshot 이후 변경 | 변경 이력(Activity Log) 조사, 임의 덮어쓰기 금지 |
 | `Stable template changed` | stable revision이 다른 방식으로 변경 | 조사 후 새 release |
 | `Stable unavailable; cannot safely route to it` | stable 비정상 | stable 복구 먼저 (incident) |
 | `Unknown revision in traffic` | 다른 릴리스/운영자가 트래픽 변경 | 소유자 확인, blind overwrite 금지 |
 | `Traffic drift; refusing blind overwrite` | 기대 weight와 다름 | 동시 작업 여부 확인 |
-| `Candidate exists: this run is not safely replayable` | 같은 run의 candidate 존재 | restore 후 새 run |
+| `Candidate exists: this run is not safely replayable` | 같은 run의 candidate 존재 | restore 후 새 run 또는 재개 run |
 | `Candidate template drift; do not mutate` | candidate가 외부에서 변경 | 조사 |
 | `Candidate readiness timed out` / `Candidate provisioning failed` | 새 이미지 기동 실패 | revision 로그/probe 확인 (자동 복구됨) |
 | `Error/business-failure SLO exceeded` / `p95 SLO exceeded` | 절대 SLO 위반 | 원인 분석 (자동 복구됨) |

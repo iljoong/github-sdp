@@ -271,8 +271,12 @@ class GitHub:
         if workflow not in WORKFLOWS:
             raise ValueError("Workflow not allowed")
         if workflow == "release.yml":
-            if set(inputs) != {"profile"} or inputs["profile"] not in ("demo", "production"):
+            if inputs.get("profile") not in ("demo", "production"):
                 raise ValueError("Invalid release profile")
+            if set(inputs) != {"profile"}:
+                if set(inputs) != {"profile", "resume_from_run_id", "start_region"} or inputs["start_region"] not in REGIONS:
+                    raise ValueError("Invalid resume target")
+                positive(inputs["resume_from_run_id"])
         else:
             if set(inputs) != {"region", "source_run_id"} or inputs["region"] not in REGIONS:
                 raise ValueError("Invalid recovery target")

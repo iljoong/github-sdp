@@ -7,12 +7,13 @@ with the inbox count badge and URL tab), approval inbox across regions + tab-tit
 health/step/traffic-stage badges, per-source freshness, stream update, active-release polling with the stream open,
 idle slow poll, inbox truncation note, polling fallback, Live/Pause/refresh, deep link + back button,
 incremental render preserving open sections, scroll and the release list, resource tree, events timeline,
-release history with per-entry actions, typed-region confirmation, keyboard shortcuts, dark theme, mobile width.
+reject-only re-run gate with re-run badges, release history with per-entry actions, typed-region confirmation, keyboard shortcuts, dark theme, mobile width.
 The fixture server logs one ConnectionAbortedError traceback when the smoke deliberately breaks the stream.
 """
 import argparse
 import base64
 import json
+import re
 import socket
 import subprocess
 import sys
@@ -69,9 +70,11 @@ def event(seconds_ago, kind, **fields):
             "actor": None, "actor_name": None, **fields}
 
 
-def gate(operation_id, run_id, region_key, reason=None, kind="deploy"):
+def gate(operation_id, run_id, region_key, reason=None, kind="deploy", attempt=1, reject_reason=None):
     return {"operation_id": operation_id, "run_id": run_id, "kind": kind, "region": region_key,
-            "environment": f"prod-{region_key}", "reason": reason, "source_run_id": None if kind == "deploy" else 480}
+            "environment": f"prod-{region_key}", "reason": reason, "source_run_id": None if kind == "deploy" else 480,
+            "run_attempt": attempt, "rerun": attempt > 1,
+            "reject_reason": reject_reason if attempt > 1 else reason}
 
 
 def source(age, state="fresh", **extra):
@@ -108,11 +111,13 @@ def snapshot(**changes):
         "inbox": [gate("op-usw", 501, "usw"),
                   gate("op-kr-rb", 610, "kr", "A different Entra approver is required", kind="rollback")],
         "actions": {"deploy": "A protected workflow is still active", "cancel": None,
-                    "rollback": "Select an original completed release", "retire": "Select an original completed release"},
+                    "rollback": "Select an original completed release", "retire": "Select an original completed release",
+                    "resume": "The original release must be completed"},
         "audit": [], "restored": False, "retired": False, "observed_at": iso(), "github_available": True,
         "audit_available": True,
         "sources": {"github": source(1), "audit": source(0), "azure:kr": source(2), "azure:sea": source(2),
-                    "azure:usw": source(2), "runtime:app--r5": source(40, "stale")},
+                    "azure:usw": source(2), "runtime:app--r5": source(40, "stale"),
+                    "hints": {"observed_at": None, "age_seconds": None, "state": "stale", "reason": "no_hints"}},
     }
     data.update(changes)
     return data
@@ -276,6 +281,12 @@ def run(fixture, headed, screenshot=None):
             assert page.locator("#freshness [data-source=audit]").inner_text() != first, "freshness does not tick"
             check("per-source freshness ticks and warns when stale")
 
+            hints = page.locator("#freshness [data-source=hints]")
+            expect(hints).to_have_attribute("data-state", "stale")
+            expect(hints).to_contain_text("변경 알림")
+            expect(hints).to_contain_text("Workflow jobs")
+            check("change-hint source warns that webhook events may not be subscribed")
+
             tab("overview")
             tree = page.locator("#tree")
             expect(tree.locator("[data-node=app]")).to_contain_text("app")
@@ -400,6 +411,46 @@ def run(fixture, headed, screenshot=None):
             expect(page).to_have_title("(1) Deployment Dashboard")
             check("approved request leaves the inbox immediately")
 
+            rerun = snapshot(run={**update["run"], "run_attempt": 2}, inbox_truncated=False,
+                             inbox=[gate("op-rerun", 501, "usw", "Re-run blocked — reject only", attempt=2)],
+                             history=[{**base["history"][0], "run_attempt": 2}, base["history"][1]],
+                             timeline=[event(300, "approval_requested", environment="prod-usw", region="usw", attempt=1),
+                                       event(60, "approval_requested", environment="prod-usw", region="usw", attempt=2)])
+            fx.call("PUT", "/__fixture/snapshot", rerun)
+            page.locator("#refresh").click()
+            gated = items.filter(has_text="prod-usw")
+            expect(gated).to_have_count(1)
+            blocked = "A different Entra approver is required"
+            fx.call("PUT", "/__fixture/snapshot", {**rerun, "inbox": [
+                gate("op-rerun", 501, "usw", blocked, attempt=2, reject_reason=blocked)]})
+            page.locator("#refresh").click()
+            expect(gated).to_contain_text("요청자 본인은 승인할 수 없습니다")
+            expect(gated.get_by_role("button", name="승인", exact=True)).to_be_disabled()
+            expect(gated.get_by_role("button", name="거부", exact=True)).to_be_disabled()
+            fx.call("PUT", "/__fixture/snapshot", rerun)
+            page.locator("#refresh").click()
+            expect(gated).to_have_attribute("data-rerun", "1")
+            expect(gated).to_contain_text("재실행 · 시도 2")
+            expect(gated).to_contain_text("승인할 수 없습니다")
+            expect(gated.get_by_role("button", name="승인", exact=True)).to_be_disabled()
+            expect(gated.get_by_role("button", name="거부", exact=True)).to_be_enabled()
+            expect(page).to_have_title("(1) Deployment Dashboard")
+            expect(page.locator("#meta .rerun")).to_have_text("재실행 · 시도 2")
+            expect(page.locator("#history > li[data-key='501'] .rerun")).to_have_text("재실행 · 시도 2")
+            expect(page.locator("#releases li[data-key='501'] .rerun")).to_have_count(1)
+            tab("timeline")
+            expect(page.locator("#timeline > li")).to_have_text([re.compile("prod-usw 승인 요청 · 시도 1"),
+                                                                   re.compile("prod-usw 승인 요청 · 시도 2")])
+            tab("inbox")
+            gated.get_by_role("button", name="거부", exact=True).click()
+            page.locator("dialog#confirm").get_by_role("button", name="확인", exact=True).click()
+            expect(gated).to_have_count(0)
+            assert fx.call("GET", "/__fixture/reviews")[-1] == {"operation_id": "op-rerun", "environment": "prod-usw",
+                                                               "approved": False}
+            fx.call("PUT", "/__fixture/snapshot", update)
+            check("re-run gate is reject-only by its rerun flag: approve disabled with reason, reject blocked only by "
+                  "reject_reason, reject sent; re-run badges and timeline attempts")
+
             tab("overview")
             page.locator("[data-region=kr]").click()
             expect(page).to_have_url(f"{fx.origin}/?run=501&region=kr")
@@ -424,7 +475,8 @@ def run(fixture, headed, screenshot=None):
             recovery = snapshot(run={"id": 480, "status": "completed", "conclusion": "success", "head_sha": "1234567abc",
                                      "url": None, "profile": "production", "run_attempt": 1}, inbox=[],
                                 actions={"deploy": None, "cancel": "No active release selected", "rollback": None,
-                                         "retire": "Retire requires verified demo evidence and candidate traffic at 100%"})
+                                         "retire": "Retire requires verified demo evidence and candidate traffic at 100%",
+                                         "resume": "Only a failed or cancelled release can be resumed"})
             recovery["regions"]["kr"].update(candidate_weight=100, traffic={"app--r7": 100, "app--r5": 0})
             select = "Select this release to verify its recovery evidence"
             recovery["history"][0]["actions"] = {"rollback": select, "retire": select}
@@ -466,6 +518,41 @@ def run(fixture, headed, screenshot=None):
             page.wait_for_function("fetch('/__fixture/writes').then(r => r.json()).then(w => w.length > 0)")
             assert fx.call("GET", "/__fixture/writes") == [{"action": "rollback", "source_run_id": 480, "region": "kr"}]
             check("history rollback needs the typed region code and shows full context")
+
+            resumable = snapshot(run={"id": 470, "status": "completed", "conclusion": "failure", "head_sha": "fedcba9876",
+                                      "url": None, "profile": "production", "run_attempt": 1}, inbox=[],
+                                 runs=[{"id": 471, "status": "completed", "conclusion": "success"},
+                                       {"id": 470, "status": "completed", "conclusion": "failure"}],
+                                 actions={"deploy": None, "cancel": "No active release selected",
+                                          "rollback": "The baseline already receives all traffic",
+                                          "retire": "Retire requires verified demo evidence and candidate traffic at 100%",
+                                          "resume": None}, resume_start="usw")
+            resumable["history"] = [
+                {**history_entry(471, "completed", "success", 3600, "production", "fedcba9876", "Kim Operator", None),
+                 "resumed_from": 470},
+                history_entry(470, "completed", "failure", 7200, "production", "fedcba9876", None, None)]
+            fx.call("PUT", "/__fixture/snapshot", resumable)
+            page.goto(f"{fx.origin}/?run=470&region=kr&tab=history")
+            expect(page.locator("#history > li[data-key='471']")).to_contain_text("#470에서 재개")
+            tab("overview")
+            resume = page.locator("#operations").get_by_role("button", name="실패 지역부터 재개")
+            expect(resume).to_be_enabled()
+            resume.click()
+            dialog = page.locator("dialog#confirm")
+            for fragment in ("#470", "USW", "원본 이미지"):
+                expect(dialog.locator("#confirm-context")).to_contain_text(fragment)
+            expect(dialog.locator("#typed-row")).to_be_hidden()
+            expect(dialog.locator("#profile-row")).to_be_hidden()
+            dialog.locator("#confirm-apply").click()
+            page.wait_for_function("fetch('/__fixture/writes').then(r => r.json()).then(w => w.length > 1)")
+            assert fx.call("GET", "/__fixture/writes")[-1] == {"action": "resume", "source_run_id": 470, "region": None}
+            expect(page).to_have_url(re.compile(r"[?&]run=902(&|$)"))
+            fx.call("PUT", "/__fixture/snapshot", {**resumable, "resume_start": None, "actions": {
+                **resumable["actions"], "resume": "Every region already succeeded"}})
+            page.goto(f"{fx.origin}/?run=470&region=kr")
+            expect(page.locator("#operations").get_by_role("button", name="실패 지역부터 재개")).to_be_disabled()
+            expect(page.locator("#operations")).to_contain_text("모든 지역이 이미 성공")
+            check("resume command: server-derived start region, source image context, link from the resumed release")
 
             def luminance(selector):
                 return page.evaluate("""s => { const [r, g, b] = getComputedStyle(document.querySelector(s))

@@ -199,7 +199,7 @@ gh run watch <RETIRE_RUN_ID> --repo $repo
 | retire 실패 `Traffic drift` | candidate가 100%가 아님(release 미완료 또는 이후 변경) | release 완료 확인, 최신 release run ID 사용 |
 | retire 실패 `Stable unavailable` | 이전 revision이 이미 비활성화됨(두 번 실행) | 추가 조치 불필요 |
 | retire 실패 `Region success evidence ...` | 그 지역이 성공하지 않았거나 다른 run의 evidence | `success.json` 이 있는 run/지역 지정 |
-| evidence artifact 다운로드 실패 | release를 re-run해서 artifact 이름이 `-1` 이 아님 | 데모는 re-run 없는 release run을 사용 |
+| evidence artifact 다운로드 실패 | release를 re-run해서 artifact 이름이 `-1` 이 아님 | 데모는 re-run 없는 release run을 사용. release에 GitHub Re-run을 쓰지 말고, 실패 지역은 관제실 `실패 지역부터 재개`([7장](07-deployment-dashboard.md#실패-지역부터-재개))로 새 run에서 배포 |
 
 ## 5.10 retire 이후 복구
 

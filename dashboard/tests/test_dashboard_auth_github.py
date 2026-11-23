@@ -255,6 +255,18 @@ class GitHubTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             gh.dispatch("restore.yml", {"region": "all", "source_run_id": "123"})
 
+    def test_release_dispatch_accepts_only_well_formed_resume_inputs(self):
+        sent = []
+        gh = GitHub("owner/repo", lambda: "token", lambda *args: sent.append(args[3]) or (200, {}, {"workflow_run_id": 9}))
+        resume = {"profile": "production", "resume_from_run_id": "123", "start_region": "sea"}
+        self.assertEqual(gh.dispatch("release.yml", resume), 9)
+        self.assertEqual(sent[0]["inputs"], resume)
+        for bad in ({**resume, "start_region": "all"}, {**resume, "resume_from_run_id": "0"},
+                    {**resume, "resume_from_run_id": "12a"}, {"profile": "demo", "resume_from_run_id": "123"}):
+            with self.assertRaises(ValueError):
+                gh.dispatch("release.yml", bad)
+        self.assertEqual(len(sent), 1)
+
     def test_api_redirect_is_not_followed_and_dispatch_without_id_uncertain(self):
         for response in [(302, {"location": "https://unrelated.test"}, {}), (204, {}, None)]:
             calls = []

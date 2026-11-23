@@ -11,6 +11,8 @@ from pathlib import Path
 
 API = "2024-03-01"
 AZ = "az.cmd" if os.name == "nt" else "az"
+# Optional release-record fields of a resume run: the run it resumed and the original build run and commit.
+PROVENANCE = ("source_run_id", "build_run_id", "source_commit")
 _next_login = time.monotonic() + 1800
 
 

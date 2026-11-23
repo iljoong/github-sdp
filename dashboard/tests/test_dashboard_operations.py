@@ -38,7 +38,9 @@ class OperationsTests(unittest.TestCase):
         self.store = Table()
         self.workflow = SimpleNamespace(runs=lambda *a, **k: [], dispatch=self.dispatch,
                                         review_rule=self.review, cancel=lambda run_id: None)
-        self.reader = SimpleNamespace(check=lambda command: None, gate=lambda row, name: name == "prod-kr")
+        self.reader = SimpleNamespace(check=lambda command: None,
+                                      gate=lambda row, name: self.gate if name == "prod-kr" else None)
+        self.gate = {"attempt": 1, "rerun": False}
         self.ops = Operations(self.store, self.workflow, self.reader)
         self.operator = Actor("tenant", "user-1", frozenset({OPERATOR, APPROVER}))
         self.approver = Actor("tenant", "user-2", frozenset({APPROVER}))
@@ -119,9 +121,59 @@ class OperationsTests(unittest.TestCase):
         observer.run(235)
         self.assertEqual(calls, ["/runs/234"])
 
+    def test_resume_dispatches_release_with_server_derived_inputs_and_records_a_deploy(self):
+        sent = []
+        self.reader.check = lambda command: {"start_region": "usw", "profile": "demo"}
+        self.workflow.dispatch = lambda workflow, inputs: sent.append((workflow, inputs)) or 240
+        outcome = self.ops.request(self.operator, Command("resume", self.key, source_run_id=234))
+        self.assertEqual(sent, [("release.yml", {"profile": "demo", "resume_from_run_id": "234", "start_region": "usw"})])
+        self.assertEqual(outcome["run_id"], 240)
+        row = self.store.by_run(240)
+        self.assertEqual({k: row[k] for k in ("kind", "status", "source_run_id", "start_region", "profile")},
+                         {"kind": "deploy", "status": "accepted", "source_run_id": 234, "start_region": "usw",
+                          "profile": "demo"})
+
+    def test_resume_refused_at_write_time_records_a_blocked_deploy_and_does_not_dispatch(self):
+        def refuse(command):
+            raise InvalidAction("Every region already succeeded")
+
+        self.reader.check = refuse
+        self.workflow.dispatch = lambda *unused: self.fail("dispatched")
+        with self.assertRaisesRegex(InvalidAction, "Every region already succeeded"):
+            self.ops.request(self.operator, Command("resume", self.key, source_run_id=234))
+        self.assertEqual(self.store.get(self.key)["status"], "blocked")
+
+    def test_resume_carries_no_client_region_or_profile(self):
+        for fields in ({"source_run_id": 234, "region": "usw"}, {"source_run_id": 234, "profile": "demo"}, {}):
+            with self.assertRaises(InvalidAction):
+                Command("resume", self.key, **fields)
+        Command("resume", self.key, source_run_id=234)
+
     def test_cancel_does_not_claim_rollback(self):
         outcome = self.ops.request(self.operator, Command("cancel", self.key, source_run_id=234))
         self.assertEqual(outcome["status"], "accepted")
         self.assertNotIn("restored", outcome)
         with self.assertRaises(Conflict):
             self.ops.request(self.operator, Command("cancel", str(uuid4()), source_run_id=234))
+
+    def test_rerun_gate_refuses_approval_and_sends_a_rejection(self):
+        self.ops.request(self.operator, Command("deploy", self.key, profile="demo"))
+        self.gate = {"attempt": 2, "rerun": True}
+        sent = []
+        self.workflow.review_rule = lambda *args: sent.append(args[:3])
+        with self.assertRaisesRegex(InvalidAction, "Re-run blocked"):
+            self.ops.review(self.approver, self.key, "prod-kr", True)
+        self.assertEqual(sent, [])
+        outcome = self.ops.review(self.approver, self.key, "prod-kr", False)
+        self.assertEqual(outcome["status"], "accepted")
+        self.assertEqual(sent, [(234, "prod-kr", False)])
+        self.assertEqual(self.store.get(outcome["operation_id"])["run_attempt"], 2)
+
+    def test_attempt_one_decision_does_not_block_an_attempt_two_decision(self):
+        self.ops.request(self.operator, Command("deploy", self.key, profile="demo"))
+        self.ops.review(self.approver, self.key, "prod-kr", True)
+        self.gate = {"attempt": 2, "rerun": True}
+        self.workflow.review_rule = lambda *args: None
+        self.assertEqual(self.ops.review(self.approver, self.key, "prod-kr", False)["status"], "accepted")
+        with self.assertRaises(Conflict):
+            self.ops.review(self.approver, self.key, "prod-kr", False)

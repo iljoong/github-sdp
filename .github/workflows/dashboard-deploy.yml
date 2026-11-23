@@ -71,8 +71,8 @@ jobs:
           set -euo pipefail
           for app in "$RECEIVER_APP" "$CONSOLE_APP"; do
             for attempt in $(seq 1 30); do
-              read -r latest ready image < <(az containerapp show -g "$RESOURCE_GROUP" -n "$app" \
-                --query "[properties.latestRevisionName, properties.latestReadyRevisionName, properties.template.containers[0].image]" -o tsv | tr '\n' ' ')
+              read -r latest ready image <<< "$(az containerapp show -g "$RESOURCE_GROUP" -n "$app" \
+                --query "[properties.latestRevisionName, properties.latestReadyRevisionName, properties.template.containers[0].image]" -o tsv | tr '\n' ' ')"
               state=$(az containerapp revision show -g "$RESOURCE_GROUP" -n "$app" --revision "$latest" \
                 --query "join(' ', [properties.healthState, properties.runningState])" -o tsv)
               echo "$app $latest ready=$ready $state"

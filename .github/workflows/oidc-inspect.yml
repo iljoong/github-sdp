@@ -1,6 +1,12 @@
-name: Inspect actual protected environment OIDC claims - no Azure access
+name: Inspect protected environment OIDC claims
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Inspect claims or verify retire login with a read-only Azure query
+        type: choice
+        default: existing-claims
+        options: [existing-claims, retire-claims, retire-login]
 permissions:
   contents: read
   id-token: write
@@ -12,7 +18,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        environment: [build, prod-kr, prod-sea, prod-usw, prod-rollback-kr, prod-rollback-sea, prod-rollback-usw]
+        environment: >-
+          ${{ fromJSON(inputs.mode == 'existing-claims'
+          && '["build","prod-kr","prod-sea","prod-usw","prod-rollback-kr","prod-rollback-sea","prod-rollback-usw"]'
+          || '["retire-kr","retire-sea","retire-usw"]') }}
     environment: ${{ matrix.environment }}
     env:
       INSPECT_ENVIRONMENT: ${{ matrix.environment }}
@@ -29,3 +38,15 @@ jobs:
           path: state/claims-${{ matrix.environment }}.json
           if-no-files-found: error
           retention-days: 7
+      - uses: azure/login@8c334a195cbb38e46038007b304988d888bf676a
+        if: inputs.mode == 'retire-login'
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Verify read access to the regional Container App
+        if: inputs.mode == 'retire-login'
+        env:
+          RESOURCE_GROUP: ${{ vars.RESOURCE_GROUP }}
+          CONTAINER_APP: ${{ vars.CONTAINER_APP }}
+        run: az containerapp show --resource-group "$RESOURCE_GROUP" --name "$CONTAINER_APP" --only-show-errors --output none

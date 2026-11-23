@@ -38,8 +38,10 @@ def main():
     require(claims["ref"] == "refs/heads/main", "Inspect only protected main")
     environment = os.environ["INSPECT_ENVIRONMENT"]
     require(environment in {"build", "prod-kr", "prod-sea", "prod-usw",
-                            "prod-rollback-kr", "prod-rollback-sea", "prod-rollback-usw"},
+                            "prod-rollback-kr", "prod-rollback-sea", "prod-rollback-usw",
+                            "retire-kr", "retire-sea", "retire-usw"},
             "Unknown environment")
+    require(claims.get("environment") == environment, "Unexpected environment claim")
     claims["inspected_environment"] = environment
     save(Path("state") / f"claims-{environment}.json", claims)
     print(json.dumps(claims, indent=2), flush=True)

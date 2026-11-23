@@ -1,5 +1,6 @@
 import base64
 import concurrent.futures
+import contextlib
 import importlib.util
 import io
 import json
@@ -115,6 +116,27 @@ class SafetyTests(unittest.TestCase):
                    "exp": 999, "iat": 100}
         encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
         self.assertEqual(inspect_oidc.metadata(f"header.{encoded}.signature"), {"sub": "actual-sub"})
+
+    def test_oidc_inspection_records_each_retire_environment_subject(self):
+        for region in ("kr", "sea", "usw"):
+            environment = f"retire-{region}"
+            subject = f"repo:owner@123/repo@456:environment:{environment}"
+            payload = {"sub": subject, "iss": "https://token.actions.githubusercontent.com",
+                       "aud": "api://AzureADTokenExchange", "repository": "owner/repo",
+                       "environment": environment, "ref": "refs/heads/main"}
+            encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+            response = json.dumps({"value": f"header.{encoded}.signature"}).encode()
+            with self.subTest(environment=environment), tempfile.TemporaryDirectory() as tmp, \
+                 contextlib.chdir(tmp), patch.dict(os.environ, {
+                     "ACTIONS_ID_TOKEN_REQUEST_URL": "https://example.test/token",
+                     "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
+                     "GITHUB_REPOSITORY": "owner/repo", "INSPECT_ENVIRONMENT": environment,
+                 }), patch.object(urllib.request, "urlopen", return_value=io.BytesIO(response)), \
+                 patch("builtins.print"):
+                inspect_oidc.main()
+                claims = common.load(Path("state") / f"claims-{environment}.json")
+                self.assertEqual(claims["sub"], subject)
+                self.assertEqual(claims["inspected_environment"], environment)
 
     def test_identity_helper_uses_inspected_subject_not_legacy_construction(self):
         text = (ROOT / "scripts" / "configure-identity.ps1").read_text()

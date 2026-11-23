@@ -7,14 +7,16 @@ from .github import RemoteError
 from .store import Conflict
 
 WORKFLOW = {"deploy": "release.yml", "rollback": "restore.yml", "retire": "demo-retire.yml"}
+RERUN_REASON = "Re-run blocked — reject only"
 
 
 class InvalidAction(Exception):
     pass
 
 
-def review_claim(run_id, environment):
-    return f"review:{run_id}:{environment}"
+def review_claim(run_id, environment, attempt=1):
+    """Decision claim per run attempt; attempt 1 keeps the legacy attempt-less key so existing claims stay valid."""
+    return f"review:{run_id}:{environment}" + (f":{attempt}" if attempt != 1 else "")
 
 
 @dataclass(frozen=True)
@@ -98,20 +100,25 @@ class Operations:
         if actor.tenant_id != source["tenant"] or source["actor"] == actor.object_id:
             raise Denied("A different Entra approver is required")
         run_id = source["run_id"]
-        claim = review_claim(run_id, environment)
+        gate = self.reader.gate(source, environment)
+        if not gate:
+            raise InvalidAction("The environment is no longer waiting for this approval")
+        if gate["rerun"] and approved:
+            raise InvalidAction(RERUN_REASON)
+        attempt = gate["attempt"]
+        claim = review_claim(run_id, environment, attempt)
         if self.store.claimed(claim):
             raise Conflict("A decision already exists")
-        if not self.reader.gate(source, environment):
-            raise InvalidAction("The environment is no longer waiting for this approval")
         key = str(uuid4())
         self.store.reserve(key, {"kind": "approve" if approved else "reject", "actor": actor.object_id,
                                  "actor_name": actor.display_name,
                                  "tenant": actor.tenant_id, "source_run_id": run_id, "environment": environment,
-                                 "claim": claim})
+                                 "run_attempt": attempt, "claim": claim})
         try:
             if self.store.claimed(claim):
                 raise Conflict("A decision already exists")
-            if not self.reader.gate(source, environment):
+            # The decision must still target the same attempt it was claimed for.
+            if (self.reader.gate(source, environment) or {}).get("attempt") != attempt:
                 raise InvalidAction("The environment is no longer waiting for this approval")
         except Exception:
             self.store.finish(key, {"status": "blocked"})

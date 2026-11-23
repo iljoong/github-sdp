@@ -5,6 +5,7 @@ import re
 import subprocess
 import sys
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -149,6 +150,19 @@ class ChangeEventTests(unittest.TestCase):
         self.assertEqual(feed.poll(), 250)
         self.assertEqual(sorted(invalidated), list(range(1, 251)))
         self.assertEqual(feed.since(0), (250, list(range(1, 251))))
+
+    def test_feed_reports_when_it_started_and_when_the_newest_hint_was_received(self):
+        start = datetime.now(timezone.utc).timestamp()
+        clock = [start]
+        feed = ChangeFeed(self.inbox, lambda run_id: None, clock=lambda: clock[0], interval=0)
+        self.assertEqual((feed.started_at, feed.last_hint_at), (start, None))
+        feed.poll()
+        self.assertIsNone(feed.last_hint_at)
+        self.receive(*job_event())
+        clock[0] = start + 2
+        feed.poll()
+        received = datetime.strptime(self.inbox.changes()[-1]["received_at"], "%Y-%m-%dT%H:%M:%S.%fZ")
+        self.assertEqual(feed.last_hint_at, received.replace(tzinfo=timezone.utc).timestamp())
 
     def test_protection_rule_events_still_create_gate_rows_only(self):
         self.assertTrue(receive(*event(), SECRET, SETTINGS, self.inbox))

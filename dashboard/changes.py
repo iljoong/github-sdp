@@ -10,6 +10,13 @@ def change_key(seconds):
     return "chg:" + datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def received_epoch(value):
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
 class ChangeFeed:
     """Follows the receiver's change hints in the inbox (hints only: they never authorize anything).
 
@@ -25,6 +32,8 @@ class ChangeFeed:
         self.checked_at = float("-inf")
         self.sequence, self.events, self.seen = 0, deque(maxlen=history), set()
         self.floor = ""
+        # Hint freshness for the snapshot: when this feed began following hints and the newest hint it has read.
+        self.started_at, self.last_hint_at = clock(), None
 
     def poll(self):
         """Read new hints when the last read is older than `interval`; return the current sequence."""
@@ -48,6 +57,10 @@ class ChangeFeed:
                 return self.sequence
         fresh = []
         with self.lock:
+            for row in rows:
+                received = received_epoch(row.get("received_at"))
+                if received is not None and (self.last_hint_at is None or received > self.last_hint_at):
+                    self.last_hint_at = received
             self.floor = max(self.floor, low)
             self.seen = {key for key in self.seen if key > self.floor}
             for row in rows:

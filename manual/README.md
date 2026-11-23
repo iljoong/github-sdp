@@ -18,6 +18,7 @@
 | 6 | [06-zero-downtime-demo-guide.md](06-zero-downtime-demo-guide.md) | 무중단 배포 실습: 사전 점검, 데모 절차, retire 상세, 테스트 방법(화면·폴링·curl·KQL), 실습 교훈 |
 | 7 | [07-deployment-dashboard.md](07-deployment-dashboard.md) | 별도 배포 관제실: Entra 관리자 권한, GitHub App 보호 규칙, 배포 및 전환, 실패 지역부터 재개 |
 | 8 | [08-deployment-dashboard-permissions.md](08-deployment-dashboard-permissions.md) | Azure 재구축 권한과 범위, SAS 갱신, 임시 권한 회수 |
+| 9 | [dashboard/README.md](dashboard/README.md) | 관제실 아키텍처 (인프라 운영자용): 시스템 구성도, Azure·Entra·GitHub 구성, 로그인·승인·변경 알림 흐름, 설치·운영 다이어그램 |
 
 ## 한눈에 보는 파이프라인
 

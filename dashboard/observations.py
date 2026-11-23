@@ -290,8 +290,8 @@ class DashboardReader:
         return data if data and data.get("revision") == baseline["candidate"] else {}
 
     def recovery(self, command, run, baseline, azure, fresh=False):
-        if run.get("status") != "completed" or run.get("run_attempt") != 1:
-            return "The original release must be completed on its first attempt"
+        if run.get("status") != "completed":
+            return "The original release must be completed"
         if not baseline:
             return "The deployment baseline is unavailable, expired or unverified"
         rows = {r["name"]: r for r in azure.get("revisions", [])}
@@ -309,7 +309,27 @@ class DashboardReader:
             return "Retire requires verified demo evidence and candidate traffic at 100%"
         if rows.get(baseline["candidate"], {}).get("health") != "Healthy":
             return "The candidate is not verified healthy"
+        if self._rerun_rollout(run, azure["region"]):
+            return "A later attempt of this release ran the region's rollout"
         return None
+
+    def _rerun_rollout(self, run, region):
+        """Whether any attempt after the first started the region's rollout job (unknown states count as started)."""
+        attempts = run.get("run_attempt")
+        if type(attempts) is not int or attempts < 1:
+            return True
+        for attempt in range(2, attempts + 1):
+            for job in self.github.jobs(run["id"], attempt):
+                if (job.get("name", "").strip().lower() != f"{JOB_PREFIX[region]} / rollout"
+                        or job.get("run_attempt", attempt) != attempt):
+                    continue
+                status, conclusion = job.get("status"), job.get("conclusion")
+                if status in {"queued", "waiting", "pending", "requested"}:
+                    continue
+                if status == "completed" and (conclusion == "skipped" or (conclusion == "cancelled" and not job.get("steps"))):
+                    continue
+                return True
+        return False
 
     def _active(self):
         return bool(self.github.active_runs())
@@ -326,8 +346,8 @@ class DashboardReader:
             if run.get("status") == "completed":
                 raise InvalidAction("This release has already completed")
             return
-        if run.get("status") != "completed" or run.get("run_attempt") != 1:
-            raise InvalidAction("The original release must be completed on its first attempt")
+        if run.get("status") != "completed":
+            raise InvalidAction("The original release must be completed")
         region = command.region
         # Write-time eligibility never trusts cached evidence.
         baseline = self.baseline(run, region, fresh=True)
@@ -403,7 +423,7 @@ class DashboardReader:
                 states = job_states(jobs, "deploy")
                 progress = job_progress(jobs, self.shared.repo, run["id"], now)
                 # Evidence cannot change any action until the source run completes.
-                if run.get("run_attempt") == 1 and run.get("status") == "completed":
+                if run.get("status") == "completed":
                     baseline = self.baseline(run, region)
             active_runs = self.github.active_runs()
         except SOURCE_ERRORS:
@@ -509,8 +529,8 @@ class DashboardReader:
             for action in ("rollback", "retire"):
                 if selected and row["id"] == selected["id"]:
                     actions[action] = reasons[action]
-                elif row.get("status") != "completed" or row.get("run_attempt") != 1:
-                    actions[action] = blocked(action) or "The original release must be completed on its first attempt"
+                elif row.get("status") != "completed":
+                    actions[action] = blocked(action) or "The original release must be completed"
                 else:
                     actions[action] = blocked(action) or "Select this release to verify its recovery evidence"
             result.append({**self._view_run(row), "started_at": _iso(start) if start is not None else None,

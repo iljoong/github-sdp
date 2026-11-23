@@ -47,6 +47,7 @@ const eventText = {job_started: "시작", approval_requested: "승인 요청"};
 const regionKeys = {Digit1: "kr", Digit2: "sea", Digit3: "usw", Numpad1: "kr", Numpad2: "sea", Numpad3: "usw"};
 const healthBadges = {healthy: "✓ 정상", progressing: "⟳ 진행 중", degraded: "✕ 저하", waiting: "⏸ 대기", unknown: "? 미확인"};
 const sourceReasons = {rate_limited: "GitHub 호출 제한", upstream_error: "조회 실패", not_produced: "응답 없음"};
+const HINTS_UNSUBSCRIBED = "실행 중인데 변경 알림이 없음: GitHub App의 Workflow runs/Workflow jobs 웹훅 이벤트 구독을 확인하세요 (폴링으로 갱신 중)";
 // Polling intervals (ms): fast while a release or approval is in flight, even with the change stream open
 // (step, elapsed time and traffic stage change without webhook events); when idle, a slow safety net behind
 // the stream or a slower poll without it. Errors back off exponentially up to the maximum.
@@ -511,6 +512,7 @@ function render(snapshot) {
 function sourceName(key) {
   if (key === "github") return "GitHub";
   if (key === "audit") return "운영 이력";
+  if (key === "hints") return "변경 알림";
   if (key.startsWith("azure:")) return `Azure ${key.slice(6).toUpperCase()}`;
   if (key.startsWith("runtime:")) return `표본 ${key.slice(8)}`;
   return key;
@@ -527,9 +529,13 @@ function tick() {
   for (const [key, source] of sources) {
     const item = $("freshness").querySelector(`[data-key="${CSS.escape(key)}"]`);
     const age = source.age_seconds == null ? null : source.age_seconds + passed;
-    const state = source.state === "fresh" && age > STALE_SECONDS ? "stale" : source.state;
+    // A change hint can be long past while still fresh (no active run); only the server decides it is stale.
+    const state = source.state === "fresh" && age > STALE_SECONDS && key !== "hints" ? "stale" : source.state;
     const parts = [sourceName(key)];
-    if (state === "unavailable" || age == null) parts.push(`조회 불가${source.reason ? ` (${sourceReasons[source.reason] ?? source.reason})` : ""}`);
+    if (key === "hints") {
+      parts.push(age == null ? "수신 기록 없음" : `${duration(age)} 전 수신`);
+      if (state === "stale") parts.push("오래됨", HINTS_UNSUBSCRIBED);
+    } else if (state === "unavailable" || age == null) parts.push(`조회 불가${source.reason ? ` (${sourceReasons[source.reason] ?? source.reason})` : ""}`);
     else {
       parts.push(`${duration(age)} 전`);
       if (state === "stale") parts.push("오래됨");

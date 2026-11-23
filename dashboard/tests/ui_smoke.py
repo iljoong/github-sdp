@@ -112,7 +112,8 @@ def snapshot(**changes):
         "audit": [], "restored": False, "retired": False, "observed_at": iso(), "github_available": True,
         "audit_available": True,
         "sources": {"github": source(1), "audit": source(0), "azure:kr": source(2), "azure:sea": source(2),
-                    "azure:usw": source(2), "runtime:app--r5": source(40, "stale")},
+                    "azure:usw": source(2), "runtime:app--r5": source(40, "stale"),
+                    "hints": {"observed_at": None, "age_seconds": None, "state": "stale", "reason": "no_hints"}},
     }
     data.update(changes)
     return data
@@ -275,6 +276,12 @@ def run(fixture, headed, screenshot=None):
             page.wait_for_timeout(2100)
             assert page.locator("#freshness [data-source=audit]").inner_text() != first, "freshness does not tick"
             check("per-source freshness ticks and warns when stale")
+
+            hints = page.locator("#freshness [data-source=hints]")
+            expect(hints).to_have_attribute("data-state", "stale")
+            expect(hints).to_contain_text("변경 알림")
+            expect(hints).to_contain_text("Workflow jobs")
+            check("change-hint source warns that webhook events may not be subscribed")
 
             tab("overview")
             tree = page.locator("#tree")

@@ -230,11 +230,13 @@ def source(now, observed, stale_after, reason=None):
 
 class DashboardReader:
     def __init__(self, shared, targets, github, evidence, inbox, store, azure=None, cache=None, clock=time.time,
-                 stale_after=15):
+                 stale_after=15, hints=None, hint_after=900):
         self.shared, self.targets, self.github = shared, targets, github
         self.evidence, self.inbox, self.store, self.azure = evidence, inbox, store, azure
         # cache: the display ReadCache (observation ages and rate-limit back-off); None for uncached readers.
         self.cache, self.clock, self.stale_after = cache, clock, stale_after
+        # hints: the ChangeFeed (started_at, last_hint_at); None leaves the hints source out of the snapshot.
+        self.hints, self.hint_after = hints, hint_after
 
     def _run_matches(self, run, run_id, workflow):
         path = f".github/workflows/{workflow}"
@@ -367,8 +369,23 @@ class DashboardReader:
                     sample = revision["sample"]
                     sources[f"runtime:{revision['name']}"] = source(
                         now, _epoch(sample.get("observed_at")) if sample else None, self.stale_after, "not_produced")
+        active = result.pop("_active")
+        if self.hints is not None:
+            sources["hints"] = self._hints_source(now, active)
         result["sources"] = sources
         return result
+
+    def _hints_source(self, now, active):
+        """Change hints (webhook workflow_run/workflow_job) are stale only while a run is active and none arrived
+        for `hint_after` seconds since the latest of: the last hint, the newest active run start, the feed start."""
+        last = self.hints.last_hint_at
+        entry = {"observed_at": _iso(last) if last is not None else None,
+                 "age_seconds": int(max(0, now - last)) if last is not None else None, "state": "fresh"}
+        started = [_epoch(run.get("run_started_at") or run.get("created_at")) for run in active]
+        marks = [mark for mark in (last, self.hints.started_at, *started) if mark is not None]
+        if active and marks and now - max(marks) > self.hint_after:
+            entry.update(state="stale", reason="no_hints")
+        return entry
 
     def _github_source(self, now, available, seen):
         backoff = self.cache.backoff_remaining() if self.cache else 0
@@ -492,7 +509,8 @@ class DashboardReader:
                 "timeline": self._timeline(run, jobs, ops) if run else [],
                 "pending": pending, "inbox": inbox, "inbox_truncated": inbox_truncated, "actions": reasons, "audit": [{k: row[k] for k in public if k in row} for row in audit],
                 "restored": restored is True, "retired": retired is True, "observed_at": stamp(),
-                "github_available": gh_available, "audit_available": audit_available, "_audit_read": audit_read}
+                "github_available": gh_available, "audit_available": audit_available, "_audit_read": audit_read,
+                "_active": [*active_runs, *([run] if run and run.get("status") != "completed" else [])]}
 
     def _history(self, rows, selected, ops, reasons, blocked, now):
         """Release history entries; recovery reasons are fully evaluated only for the selected release."""

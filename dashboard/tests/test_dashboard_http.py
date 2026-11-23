@@ -45,7 +45,7 @@ class DashboardHTTPTests(unittest.TestCase):
         self.client.app.state.reader = Console().reader
         data = self.client.get("/api/dashboard?region=sea", headers=self.headers).json()
         self.assertEqual(set(data["sources"]), {"github", "audit", "azure:kr", "azure:sea", "azure:usw",
-                                                "runtime:app-sea--r5", "runtime:app-sea--r7"})
+                                                "runtime:app-sea--r5", "runtime:app-sea--r7", "hints"})
         self.assertEqual(set(data["sources"]["github"]), {"observed_at", "age_seconds", "state"})
         self.assertEqual(data["sources"]["runtime:app-sea--r5"]["reason"], "not_produced")
         self.assertEqual(data["inbox"], [])

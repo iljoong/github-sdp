@@ -304,6 +304,8 @@ class Console:
         self.audit_down = False
         self.claims = set()
         self.cache = ReadCache(self._send, clock=lambda: self.now)
+        # The console has been following change hints for an hour and has not seen one yet.
+        self.hints = SimpleNamespace(started_at=T0 - 3600, last_hint_at=None)
 
         def recent():
             if self.audit_down:
@@ -315,7 +317,7 @@ class Console:
         self.reader = DashboardReader(
             SimpleNamespace(repo="owner/repo", repo_id=12), TARGETS, GitHub("owner/repo", lambda: "t", self.cache),
             SimpleNamespace(file=lambda *_, **__: None), SimpleNamespace(rules=lambda run_id: self.rules.get(run_id, [])),
-            store, SimpleNamespace(region=self._azure), cache=self.cache, clock=lambda: self.now)
+            store, SimpleNamespace(region=self._azure), cache=self.cache, clock=lambda: self.now, hints=self.hints)
 
     def _send(self, method, url, headers, body):
         if self.github_status != 200:
@@ -394,6 +396,36 @@ class SnapshotFreshnessTests(unittest.TestCase):
         self.assertNotIn("runtime:app-sea--r7", sources)
         console.audit_down = True
         self.assertEqual(console.snapshot()["sources"]["audit"]["state"], "unavailable")
+
+    def test_hints_are_stale_when_an_active_run_has_produced_no_change_hint_for_too_long(self):
+        console = Console("in_progress")
+        console.now = T0 + 901
+        self.assertEqual(console.snapshot()["sources"]["hints"],
+                         {"observed_at": None, "age_seconds": None, "state": "stale", "reason": "no_hints"})
+        console.hints.last_hint_at = T0 - 100
+        self.assertEqual(console.snapshot()["sources"]["hints"],
+                         {"observed_at": iso(T0 - 100), "age_seconds": 1001, "state": "stale", "reason": "no_hints"})
+
+    def test_hints_are_fresh_after_a_recent_hint(self):
+        console = Console("in_progress")
+        console.now = T0 + 2000
+        console.hints.last_hint_at = T0 + 1970
+        self.assertEqual(console.snapshot()["sources"]["hints"],
+                         {"observed_at": iso(T0 + 1970), "age_seconds": 30, "state": "fresh"})
+
+    def test_hints_are_not_stale_without_an_active_run(self):
+        console = Console("completed")
+        console.now = T0 + 5000
+        self.assertEqual(console.snapshot()["sources"]["hints"],
+                         {"observed_at": None, "age_seconds": None, "state": "fresh"})
+
+    def test_a_run_or_console_that_started_recently_is_given_time_for_its_first_hint(self):
+        console = Console("in_progress")
+        console.now = T0 + 600
+        self.assertEqual(console.snapshot()["sources"]["hints"]["state"], "fresh")
+        console.now = T0 + 5000
+        console.hints.started_at = T0 + 4500
+        self.assertEqual(console.snapshot()["sources"]["hints"]["state"], "fresh")
 
 
 class ApprovalInboxTests(unittest.TestCase):

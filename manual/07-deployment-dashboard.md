@@ -2,7 +2,9 @@
 
 관제실은 별도 Azure Container App입니다. 운영자는 **Build → KR → SEA → USW**를 따라 실행, 지역 승인, Azure 트래픽·리비전·레플리카를 봅니다. `/verify`와 같은 JSON endpoint를 읽되 HTTP에 응답한 표본을 Azure 인벤토리와 구분합니다. 주요 ENV는 허용 목록만 표시합니다. 승인 대기와 Azure 트래픽 100%는 서로 다른 정보입니다.
 
-관제실은 기존 `release.yml`, `restore.yml`, `demo-retire.yml`에 요청합니다. Azure 쓰기는 기존 워크플로의 OIDC 및 안전 스크립트가 담당합니다. 재실행, 진행 중 원본의 롤백, 전체 지역 롤백, 운영 프로필의 retire와 비활성 리비전 재활성화는 관제실에서 지원하지 않습니다.
+관제실은 기존 `release.yml`, `restore.yml`, `demo-retire.yml`에 요청합니다. Azure 쓰기는 기존 워크플로의 OIDC 및 안전 스크립트가 담당합니다. 진행 중 원본의 롤백, 전체 지역 롤백, 운영 프로필의 retire와 비활성 리비전 재활성화는 관제실에서 지원하지 않습니다.
+
+> ⚠️ **릴리스에 GitHub의 "Re-run jobs"/"Re-run failed jobs"를 사용하지 마세요.** 배포 job은 첫 시도(`run_attempt == 1`)만 허용하므로 재실행은 배포하지 못하고 승인 대기에 걸립니다. 실패한 릴리스를 이어서 배포하려면 관제실의 **실패 지역부터 재개**(아래 [재개](#실패-지역부터-재개))를 사용합니다. 배경은 [ADR 0001](../docs/adr/0001-rerun-prohibition-and-region-resume.md)을 참고하세요.
 
 ## 사전 준비
 
@@ -13,9 +15,10 @@
 3. **GitHub App:** 권한을 **Actions: read/write**, **Deployments: read/write**로 지정하고 대상 저장소 하나에만 설치합니다. repository ID, installation ID, App **client ID**를 기록합니다. GitHub App에서 발급한 RSA private key를 Key Vault에 서명 가능한 key로 import합니다. 앱에는 버전이 포함된 Key Vault key URI만 전달합니다. Webhook secret은 서명 키와 별개이며, 같은 고엔트로피 값(32바이트 이상)을 GitHub App과 receiver의 Key Vault secret으로 구성합니다. 키/secret 원문을 이미지·파라미터 파일·로그에 남기지 않습니다.
 4. **Azure:** 두 개의 전용 user-assigned MI와 ACA Environment, ACR을 준비합니다. 두 MI에 이미지 pull 권한을 부여합니다(ABAC를 사용하는 ACR이면 repository 읽기 권한을 사용). 콘솔 MI에는 등록된 세 대상 ACA의 `Reader`, Entra 로그인 secret에 대한 Key Vault secret 읽기, GitHub App key에 대한 `Microsoft.KeyVault/vaults/keys/sign/action` DataAction만 부여합니다. Receiver MI에는 webhook secret 읽기만 부여하고 GitHub App 서명 권한을 주지 않습니다. 템플릿은 별도의 Table Storage와 각 테이블의 권한을 생성합니다. 수신기는 inbox insert만, 콘솔은 inbox 읽기와 작업 테이블 사용이 가능합니다. 원격 Key Vault에서 RBAC 전파를 확인한 후 ACA를 구성합니다.
 5. **이미지 및 IaC:** 저장소 루트에서 `docker build --file dashboard\Dockerfile --tag <registry>/deployment-dashboard:<tag> dashboard`로 이미지를 만듭니다. 승인된 ACR에 게시해 digest를 얻은 뒤, `infra\dashboard.bicep`의 `image`에 digest 참조를 전달합니다. 두 ACA는 같은 digest를 사용하지만 실행 모듈과 역할이 다릅니다. 템플릿 파라미터 `targets`에는 `kr`/`sea`/`usw` 각각의 전체 Container App 리소스 ID를 전달합니다. 외부 URL은 템플릿의 기본 ACA FQDN을 사용합니다(사용자 지정 hostname과 Azure 정부/중국 클라우드는 범위 밖입니다). 이 템플릿은 VNet·Private Endpoint·DNS 또는 Storage의 공용 네트워크 차단을 구성하지 않습니다. 운영에 사용하기 전에 이 항목을 별도로 구성하고 사설 경로를 검증합니다.
-6. **Callback:** 템플릿 출력 `githubCallback`을 GitHub App webhook URL로 등록하고 요청의 `deployment_protection_rule` 이벤트를 받도록 구성합니다. receiver는 서명과 설치·저장소·환경·실행 ID를 검사합니다. `consoleUrl`에는 운영자가 로그인하고, callback URL에는 Easy Auth를 적용하지 않습니다. 서명 실패는 대기 요청을 만들지 않습니다.
-   - 같은 App webhook에서 **Workflow runs**(`workflow_run`)와 **Workflow jobs**(`workflow_job`) 이벤트도 구독합니다. 추가 권한은 필요 없습니다(Actions: read에 포함). receiver는 같은 서명·크기·설치·저장소 검사를 적용하고, `main` 브랜치의 허용된 workflow(`release.yml`, `release-kr.yml`, `restore.yml`, `demo-retire.yml`; job 이벤트는 해당 workflow 이름)만 inbox에 delivery당 한 번 변경 힌트(`chg:` 행)로 기록합니다. 다른 브랜치·workflow 이벤트는 저장하지 않고 수락만 하며, 위조·다른 저장소 이벤트는 거부합니다.
-   - 변경 힌트는 콘솔의 GitHub 읽기 캐시를 비우고 열린 브라우저에 `/api/changes` 스트림으로 "run X 변경"만 알려 즉시 새로고침하게 하는 용도입니다. 승인·배포·취소·롤백·retire 판단에는 쓰이지 않으며, 쓰기 시점에는 항상 GitHub와 증거를 다시 읽습니다. 두 이벤트를 구독하지 않아도 콘솔은 주기적 새로고침으로 동작하지만 화면 반영이 느려집니다.
+6. **Callback:** 템플릿 출력 `githubCallback`을 GitHub App webhook URL로 등록합니다. App의 webhook 이벤트는 **Deployment protection rule**(`deployment_protection_rule`), **Workflow runs**(`workflow_run`), **Workflow jobs**(`workflow_job`) 세 가지를 모두 구독해야 합니다. receiver는 서명과 설치·저장소·환경·실행 ID를 검사합니다. `consoleUrl`에는 운영자가 로그인하고, callback URL에는 Easy Auth를 적용하지 않습니다. 서명 실패는 대기 요청을 만들지 않습니다.
+   - Deployment protection rule 이벤트가 없으면 승인 대기가 관제실에 나타나지 않습니다. GitHub에서 재실행한 실행(시도 2 이상)의 보호 규칙 요청도 이 이벤트로 수신되어 "거부 전용"으로 표시됩니다.
+   - **Workflow runs**(`workflow_run`)와 **Workflow jobs**(`workflow_job`)에는 추가 권한이 필요 없습니다(Actions: read에 포함). receiver는 같은 서명·크기·설치·저장소 검사를 적용하고, `main` 브랜치의 허용된 workflow(`release.yml`, `release-kr.yml`, `restore.yml`, `demo-retire.yml`; job 이벤트는 해당 workflow 이름)만 inbox에 delivery당 한 번 변경 힌트(`chg:` 행)로 기록합니다. 다른 브랜치·workflow 이벤트는 저장하지 않고 수락만 하며, 위조·다른 저장소 이벤트는 거부합니다.
+   - 변경 힌트는 콘솔의 GitHub 읽기 캐시를 비우고 열린 브라우저에 `/api/changes` 스트림으로 "run X 변경"만 알려 즉시 새로고침하게 하는 용도입니다. 승인·배포·취소·롤백·retire·재개 판단에는 쓰이지 않으며, 쓰기 시점에는 항상 GitHub와 증거를 다시 읽습니다. 두 이벤트를 구독하지 않아도 콘솔은 주기적 새로고침으로 동작하지만 화면 반영이 느려지고, 실행 중에는 **변경 알림** 칩이 오래됨으로 표시됩니다.
 
 **Easy Auth 토큰 저장소:** ACA는 SAS URL이 있는 private Blob 컨테이너를 요구합니다. 신규 배포에서는 대상 Storage와 private `dashboardtokens` 컨테이너를 먼저 준비한 뒤, 공유 키를 켜지 않고 HTTPS 전용 사용자 위임 SAS(`rwd`, 최대 7일)를 발급합니다. URL은 Key Vault 비밀로 저장하고 URI만 `tokenStoreSasSecretUri`에 전달합니다. 콘솔 ID에만 해당 비밀 읽기를 부여합니다. 만료 전에 갱신하고 새 세션 로그인을 확인합니다. 갱신 절차를 검증하기 전 운영 인증에 사용하지 않습니다.
 
@@ -40,29 +43,48 @@ az bicep build --file infra\dashboard.bicep --stdout
 
 - 서로 다른 Entra 관리자 두 명을 사용합니다. 운영자에게 `ReleaseOperator`, 승인자에게 `ReleaseApprover`를 부여합니다. 두 역할을 모두 가진 경우에도 본인의 요청을 승인할 수 없는지 확인합니다. 계정 연결 없이 로그인/요청/승인하고, 미할당 사용자/서비스 주체/무권한 사용자의 접근이 거부되는지 확인합니다.
 - 검증용 GitHub 환경의 `prod-kr`, `prod-sea`, `prod-usw`, `prod-rollback-*`에서 이 App의 custom protection rule을 사용합니다. branch 제한은 유지하고, 기존 required reviewer가 남아 있으면 별도로 만족해야 합니다. `build` 환경에 사람 gate가 있는지 확인합니다. 기존 환경이 custom rule을 받도록 수정하기 **전에** 되돌릴 보호 설정을 기록합니다.
-- demo run을 관제실에서 시작하고 정확한 run ID가 돌아오는지 확인합니다. KR → SEA → USW 순서로 별도 관리자가 승인하고, webhook delivery 및 GitHub job 상태가 맞는지 확인합니다. 거부·취소 후에는 자동 복구를 추정하지 말고 artifact/Azure 트래픽을 대조합니다. 완료한 run에서 한 지역 롤백과 별도 demo run의 retire를 각각 검증합니다. retire 후 이전 revision 재활성화가 별도 절차라는 점을 확인합니다.
+- demo run을 관제실에서 시작하고 정확한 run ID가 돌아오는지 확인합니다. KR → SEA → USW 순서로 별도 관리자가 승인하고, webhook delivery 및 GitHub job 상태가 맞는지 확인합니다. 거부·취소 후에는 자동 복구를 추정하지 말고 artifact/Azure 트래픽을 대조합니다. 완료한 run에서 한 지역 롤백과 별도 demo run의 retire를 각각 검증합니다. retire 후 이전 revision 재활성화가 별도 절차라는 점을 확인합니다. 한 지역이 실패한 demo run에서 **실패 지역부터 재개**가 실패 지역부터 승인을 다시 받고 같은 이미지로 배포하는지 확인합니다.
 - GitHub의 자동 redelivery를 가정하지 않습니다. 서명된 webhook 실패 시 GitHub App의 최근 배달에서 상태를 점검하고 필요하면 그 delivery를 redeliver합니다. 정책을 끄거나 수동으로 통과시키기 전에 이상 원인을 조사합니다.
 - 화면의 GitHub 조회는 콘솔 인스턴스 내에서 공유됩니다. 진행 중인 run(및 그 job·승인 대기)과 run 목록은 약 5초, 완료된 run과 그 job·승인 대기(run 목록에서 완료로 확인된 run 포함)는 약 5분간 재사용하며(ETag 조건부 재조회 유지), 콘솔에서 배포·취소·승인/거절을 요청하면 해당 run과 run 목록의 캐시를 즉시 무효화합니다. 승인·취소·배포를 실제로 요청할 때는 캐시를 사용하지 않고 조건을 다시 확인합니다.
 - 화면 사용법:
   - 화면 구성: 상단 바에는 "Deployment Dashboard", 연결 상태, 아이콘 버튼(실시간 갱신/일시정지, 새로고침, 승인 요청 알림 — 마우스를 올리면 이름이 표시됨)과 계정 표시(별칭과 Operator/Approver 역할)가 있습니다. 계정 표시를 누르면 전체 이름·계정, `계정 전환`, `Sign out` 메뉴가 열립니다. 왼쪽 사이드바 맨 위의 `새 배포`로 배포를 시작하고, 그 아래 릴리스 목록(번호·상태·릴리스 이름·profile·커밋·시작 시각·요청자)에서 항목을 클릭하거나 키보드 Enter로 선택합니다. 본문에는 릴리스 이름(GitHub 실행 제목)과 `#ID · main · profile · 커밋 · 상태`, GitHub 링크, Build/KR/SEA/USW 단계 막대(지역을 누르면 해당 지역 선택)가 있고, 그 아래 탭 **개요**(지역 상세·지역 작업) | **승인 대기**(건수 배지) | **타임라인** | **운영 이력**(운영 기록·데이터 출처) | **릴리스 이력**으로 나뉩니다.   탭은 좌우 화살표 키로도 이동합니다.
   - **승인 대기** 탭은 현재 선택한 릴리스·지역과 관계없이 콘솔에서 시작한 진행 중 실행의 모든 지역 승인 요청을 보여 줍니다. 콘솔에서 시작한 진행 중 실행이 10개를 넘으면 일부만 표시하고 목록 아래에 그 사실을 알리므로 나머지는 GitHub Actions에서 확인하세요. 브라우저 탭 제목의 `(n)`은 내가 승인할 수 있는 요청 수입니다. 본인이 요청한 작업은 목록에 보이지만 "다른 승인자가 승인해야 합니다"라는 설명과 함께 버튼이 비활성화됩니다. 탭의 배지는 전체 요청 수이며, 내가 승인할 수 있는 요청이 있으면 탭이 주황색으로 강조됩니다. 승인/거부가 접수되면 해당 항목은 즉시 목록에서 사라집니다. `승인 요청 알림`을 켜고 브라우저 알림을 허용하면 새 요청이 생길 때 알림을 받습니다(브라우저별 설정, 기본 꺼짐).
+  - GitHub에서 릴리스를 재실행(Re-run)해 시도 2 이상에서 생긴 승인 요청은 `재실행 · 시도 N` 배지와 함께 **"Re-run blocked — reject only"**로 표시됩니다. 재실행은 배포할 수 없으므로 `승인`은 사유와 함께 비활성화되고, `ReleaseApprover`는 `거부`만 할 수 있습니다(본인이 요청한 릴리스는 거부도 불가). 거부하면 GitHub의 해당 시도가 즉시 종료됩니다. 이 항목도 "내가 처리 가능" 건수와 알림("재실행 보호 규칙 거부 필요")에 포함됩니다. 승인·거부 결정은 시도별로 기록되므로 시도 1의 승인 기록이 이후 시도의 거부를 막지 않습니다. 이전 시도에서 받은 보호 규칙 요청으로는 현재 시도의 승인 대기가 열리지 않습니다.
   - 출처별 칩(GitHub, 운영 이력, Azure 지역, 레플리카 표본)은 각 데이터의 "n초 전" 관찰 시각을 매초 갱신하며, 오래되었거나 조회할 수 없으면 강조 표시합니다. GitHub 호출 제한 중에는 재시도까지 남은 시간을 표시합니다. 오래된 정보로 변경을 요청하지 마세요.
   - **변경 알림** 칩은 수신기가 마지막으로 받은 `workflow_run`/`workflow_job` 변경 알림 시각을 보여 줍니다. 실행이 진행 중인데 15분 넘게 알림이 없으면 오래됨으로 강조하고 GitHub App의 Workflow runs·Workflow jobs 웹훅 이벤트 구독을 확인하라고 안내합니다. 알림이 없어도 콘솔은 폴링으로 계속 갱신합니다.
   - `실시간 갱신`이 켜져 있으면 `/api/changes` 스트림 신호를 받는 즉시 화면을 다시 조회합니다(상태 표시 "실시간 연결됨"). 단계·경과 시간·트래픽 단계는 webhook 없이도 바뀌므로 진행 중인 릴리스·승인 대기가 있으면 스트림 연결과 관계없이 약 5초 간격으로 조회합니다. 유휴 상태에서는 스트림이 연결되어 있으면 약 60초, 스트림을 쓸 수 없으면 약 30초 간격으로 조회하고, 오류가 반복되면 최대 2분까지 간격을 늘립니다. 탭이 숨겨지면 조회를 멈추고 돌아오면 즉시 갱신합니다. 버튼을 끄면 일시정지되어 자동 갱신하지 않으며 `새로고침`으로만 조회합니다.
   - 지역 카드에는 아이콘과 글자로 된 상태 배지(정상·진행 중·저하·대기·미확인), 실행 중인 단계와 경과 시간, 트래픽 단계(0/10/50/100%)가 표시됩니다. 갱신 시 바뀐 부분만 다시 그리므로 열어 둔 상세, 스크롤, 릴리스 선택이 유지됩니다.
   - 주소에 선택한 릴리스와 지역이 `?run=<ID>&region=<kr|sea|usw>`(개요 외의 탭은 `&tab=<inbox|timeline|audit|history>`)로 들어가므로 링크를 공유할 수 있고 브라우저 뒤로 가기로 이전 선택으로 돌아갑니다.
-  - **릴리스 이력**은 최근 실행마다 커밋·profile·요청자·시작 시각·소요 시간을 보여 주고 `선택`으로 해당 릴리스를 엽니다. 요청자·profile은 최근 운영 이력(약 25건)과 선택한 실행에서만 확인하므로 그보다 오래된 실행은 "미확인"으로 표시됩니다. 항목별 `롤백 요청`/`이전 리비전 종료` 버튼은 선택한 릴리스에 대해서만 복구 증거를 검증해 활성화되며, 다른 항목은 먼저 선택하라는 설명이 표시됩니다.
-  - **이벤트 타임라인**은 선택한 릴리스의 job 시작·완료, 지역별 승인 요청, 콘솔에서의 배포·취소·승인·거부·롤백·종료를 오래된 순서로 최근 50건까지 보여 줍니다.
+  - **릴리스 이력**은 최근 실행마다 커밋·profile·요청자·시작 시각·소요 시간을 보여 주고 `선택`으로 해당 릴리스를 엽니다. GitHub에서 재실행된 릴리스에는 `재실행 · 시도 N` 배지가, 재개 실행에는 원본 릴리스를 여는 `#<원본>에서 재개` 링크가 붙습니다(상단 릴리스 정보에도 재실행 배지 표시). 요청자·profile은 최근 운영 이력(약 25건)과 선택한 실행에서만 확인하므로 그보다 오래된 실행은 "미확인"으로 표시됩니다. 항목별 `롤백 요청`/`이전 리비전 종료` 버튼은 선택한 릴리스에 대해서만 복구 증거를 검증해 활성화되며, 다른 항목은 먼저 선택하라는 설명이 표시됩니다.
+  - **이벤트 타임라인**은 선택한 릴리스의 job 시작·완료, 지역별 승인 요청, 콘솔에서의 배포·취소·승인·거부·롤백·종료를 오래된 순서로 최근 50건까지 보여 줍니다. 재실행된 릴리스에서는 승인 요청·결정 옆에 `시도 N`이 표시됩니다.
   - 지역 카드의 **리소스 트리**는 Container App → revision → replica → container 순으로 표시하며, Azure 목록에서 확인한 replica와 HTTP 표본에서만 관찰된 replica(기울임꼴)를 구분합니다.
-  - 롤백·이전 리비전 종료 확인 창에는 원본 실행, 지역, 기준 스냅샷의 revision 트래픽이 표시되며, 지역 코드(`kr`/`sea`/`usw`)를 직접 입력해야 실행 버튼이 활성화됩니다.
+  - 롤백·이전 리비전 종료 확인 창에는 원본 실행, 지역, 기준 스냅샷의 revision 트래픽이 표시되며, 지역 코드(`kr`/`sea`/`usw`)를 직접 입력해야 실행 버튼이 활성화됩니다. 재개 확인 창에는 원본 릴리스, 서버가 결정한 시작 지역, 이미지 재사용(재빌드 없음) 안내가 표시됩니다.
   - 운영체제/브라우저가 어두운 테마이면 화면도 어두운 테마로 표시됩니다. 단축키: `1`/`2`/`3` 지역 선택, `R` 새로고침, `L` 실시간 갱신 켜기/끄기(입력 중이거나 확인 창이 열려 있으면 동작하지 않음). 좁은 화면(모바일)에서는 사이드바가 본문 위로 올라가고 패널이 한 열로 쌓입니다.
 - 운영 정책은 GitHub `Required reviewers`를 관제실의 Entra `ReleaseApprover`와 GitHub App 보호 규칙으로 대체합니다. 브랜치 제한은 그대로 유지하고, 각 환경의 App 규칙 활성화를 다음 배포 전에 확인합니다. 전환 후 CLI에서 직접 시작한 release/restore/retire, `release-kr.yml`은 관제실에서 승인할 수 없습니다. 전환 전에 관제실 장애 시 사용할 별도 승인 경로를 마련하고 비운영 환경에서 검증합니다.
+
+## 실패 지역부터 재개
+
+릴리스가 일부 지역에서 실패하거나 취소되었을 때, 이미 성공한 지역을 다시 배포하지 않고 남은 지역만 배포하는 지원 경로입니다. GitHub "Re-run"은 사용하지 않습니다.
+
+- **동작:** 선택한 릴리스의 개요 탭 **지역 작업**에 있는 `실패 지역부터 재개`(ReleaseOperator)는 `release.yml`을 **새 실행**으로 시작합니다(입력 `profile`, `resume_from_run_id=<원본 run ID>`, `start_region`). 새 실행은 build를 건너뛰고 `promote` job(`build` 환경)에서 원본 실행을 검증한 뒤 원본이 빌드한 **같은 이미지 digest**를 새 run ID에 묶어 `release-<새 run>`으로 게시합니다. 이후 시작 지역부터 KR → SEA → USW 순서로 평소와 같은 snapshot·카나리·health gate를 거치며, 지역마다 요청자와 다른 `ReleaseApprover`의 승인이 필요합니다. 새 실행은 시도 1이므로 새 candidate 이름과 새 baseline을 사용하고, 같은 concurrency group으로 다른 릴리스와 동시에 실행되지 않습니다.
+- **시작 지역과 profile:** 사용자가 고르지 않습니다. 서버가 원본의 최근 시도에서 KR → SEA → USW 순서로 처음 성공하지 않은 지역을 시작 지역으로 정하고, profile은 원본의 운영 이력 값(없으면 `production`)을 사용합니다.
+- **활성 조건**(아니면 버튼이 사유와 함께 비활성화):
+  - ReleaseOperator 역할, 미해결 쓰기 없음, 진행 중인 보호 workflow 없음
+  - 원본 릴리스가 완료되었고 결과가 실패(`failure`) 또는 취소(`cancelled`). 재실행된 릴리스(시도 2 이상)도 가능
+  - 원본의 build가 성공했고, 시작 지역 앞의 모든 지역이 최근 시도에서 성공했으며, 이후 지역은 실행되지 않음
+  - 시작 지역의 현재 트래픽이 active·Healthy인 revision **하나에 100%**. 원본 baseline이 있으면 그 stable 또는 candidate여야 하며, baseline이 없는 지역(원본에서 snapshot 전)은 정상 revision 하나에 100%이면 그 revision이 새 baseline이 됩니다
+  - 원본 자체가 재개 실행이 아님 — 재개 실행을 다시 재개할 수 없으며, 처음 원본 릴리스에서 재개합니다
+- **결과 확인:** 접수되면 새 run이 릴리스 목록에 원본과 별개의 릴리스로 나타나고 `#<원본>에서 재개` 링크로 연결됩니다. 새 실행의 `release.json`에는 새 `commit`과 `source_run_id`가 기록됩니다. workflow·스크립트 코드는 **현재 `main`** 의 것이고 이미지는 원본의 것입니다.
+- **CLI:** 관제실을 쓸 수 없고 별도 승인 경로가 유효할 때만 `gh workflow run release.yml --ref main -f profile=<원본 profile> -f resume_from_run_id=<원본 run ID> -f start_region=<kr|sea|usw>`로 같은 실행을 시작할 수 있습니다. workflow는 원본이 이 저장소 `main`의 완료된 `release.yml` 수동 실행인지, 시작 지역 앞 지역이 최근 시도에서 성공했는지, 이미지가 설정된 ACR의 digest인지 검증하고 아니면 Azure 변경 없이 실패합니다. `release-kr.yml`은 재개할 수 없습니다.
 
 ## 운영 중 문제 해결
 
 | 증상 | 확인할 것 |
 | --- | --- |
 | 환경은 대기 중인데 승인할 수 없음 | 콘솔에서 요청한 동일 run, App 설치, webhook delivery/서명, 해당 환경의 규칙과 GitHub job 상태, Entra 승인자의 역할 및 요청자 분리 |
+| 승인 대기에 "Re-run blocked — reject only" | 누군가 GitHub에서 릴리스를 재실행했습니다. 승인할 수 없으므로 `거부`해 해당 시도를 종료하고, 남은 지역은 원본 릴리스에서 `실패 지역부터 재개`로 배포하거나 `롤백 요청`으로 되돌립니다. |
+| 실패한 릴리스에서 `실패 지역부터 재개`가 비활성 | 표시된 사유를 확인합니다. 시작 지역 트래픽이 정상 revision 하나에 100%가 아니면 먼저 롤백 또는 조사로 상태를 정리합니다. 재개 실행의 재개는 지원하지 않으므로 처음 원본 릴리스를 선택합니다. |
+| **변경 알림** 칩이 오래됨 | GitHub App의 Workflow runs·Workflow jobs 이벤트 구독과 최근 delivery를 확인합니다. 화면은 폴링으로 계속 갱신됩니다. |
 | 작업 결과가 `확인 필요` 또는 `reserved`에 머묾 | 진행 중인 쓰기가 끝나기를 기다립니다. `reserved`는 GitHub 요청이 전달됐지만 저장에 실패한 경우에도 남을 수 있습니다. 운영 지원 담당자가 작업 종류에 맞춰 GitHub run/결정 이력의 워크플로·브랜치·입력·원본 실행·요청 시각을 대조하고 Azure 트래픽을 확인합니다. 해당 App의 승인/거부 결과를 job 진행 여부만으로 추정하지 않습니다. 정확한 결과를 입증하지 못하면 쓰기 잠금을 유지하고 재시도하지 않습니다. 입증되면 `dashboardops`에서 `op:<operation_id>` 정정(접수된 dispatch는 확인한 `run_id` 포함), 접수된 dispatch의 `run:<run_id>` 색인 행 생성(`operation_id=<operation_id>`), 접수 확인된 승인·거부·취소의 `claim:<op의 claim 값>` 생성(`owner=<operation_id>`), 같은 소유자의 `lock:write` 해제를 한 파티션 트랜잭션으로 처리합니다. 작업 행과 잠금은 조회 당시 ETag를 사용합니다. `recent:<역순 시각>:<operation_id>`와 `run:<run_id>`는 `operation_id`만 담는 조회 색인이며 상태는 항상 `op:` 행을 따릅니다. `meta:index-v1`은 기존 행 색인이 끝났다는 표시이므로 삭제하지 않습니다. |
 | 실행은 완료됐지만 복구/종료 검증이 표시되지 않음 | 해당 시도의 artifact 유무·만료, 원본 run과 stable revision, 현재 실제 트래픽/active 값을 대조합니다. UI의 `GitHub 요청 접수`는 작업의 성공이 아닙니다. |
 | 관제실 중단 또는 보호 규칙 동작 이상 | 기존 안전장치를 삭제하지 말고 변경 요청을 중단합니다. 비상 복구는 승인된 운영 정책과 기존 runbook을 따릅니다. 전환을 되돌리려면 기록한 환경 보호 정책을 복구한 다음 custom rule을 해제합니다. |

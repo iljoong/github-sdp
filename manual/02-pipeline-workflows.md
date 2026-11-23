@@ -3,11 +3,12 @@
 ## 2.1 Workflow 관계도
 
 ```text
-release.yml (workflow_dispatch, profile)
- ├─ build        → build.yml  environment: build      (version_prefix r)
+release.yml (workflow_dispatch, profile [, resume_from_run_id, start_region])
+ ├─ build        → build.yml  environment: build      (version_prefix r, 재개 아닐 때)
+ ├─ promote      → promote_source.py environment: build (재개일 때만, 재빌드 없음)
  ├─ korea        → region.yml environment: prod-kr
- ├─ southeastasia→ region.yml environment: prod-sea   (korea 성공 시)
- └─ westus       → region.yml environment: prod-usw   (sea 성공 시)
+ ├─ southeastasia→ region.yml environment: prod-sea   (korea 성공 시, 또는 재개 시작 지역)
+ └─ westus       → region.yml environment: prod-usw   (sea 성공 시, 또는 재개 시작 지역)
 
 release-kr.yml (workflow_dispatch, profile=quick 기본) – 빠른 무중단 검증용
  ├─ build        → build.yml  environment: build      (version_prefix k)
@@ -28,9 +29,9 @@ demo-retire.yml (workflow_dispatch, source_run_id, region) – 데모 전용
 
 | 항목 | 값 |
 | --- | --- |
-| 트리거 | `workflow_dispatch`, 입력 `profile` = `production`(기본) / `demo` |
-| 동시성 | `safe-aca-production`, `cancel-in-progress: false` |
-| 브랜치 제한 | `github.ref == refs/heads/main` 에서만 build 실행 |
+| 트리거 | `workflow_dispatch`, 입력 `profile` = `production`(기본) / `demo`; 재개 전용 `resume_from_run_id`(기본 빈 값 = 일반 릴리스), `start_region` = `kr`(기본) / `sea` / `usw` |
+| 동시성 | `safe-aca-production`, `cancel-in-progress: false` (재개 run도 동일) |
+| 브랜치 제한 | `github.ref == refs/heads/main` 에서만 build/promote 실행 |
 
 **build job** → 재사용 workflow `build.yml` (environment `build`, 30분 제한).
 `release.yml` 과 `release-kr.yml` 이 같은 build를 씁니다.
@@ -46,6 +47,43 @@ demo-retire.yml (workflow_dispatch, source_run_id, region) – 데모 전용
 
 **지역 job**: `region.yml` 을 `region`/`environment`/`profile` 입력으로 호출합니다.
 앞 지역 결과가 `success` 일 때만 다음 지역이 실행됩니다.
+
+> ⚠️ 실패한 release에 GitHub **"Re-run jobs"/"Re-run failed jobs"를 쓰지 마세요.** build·snapshot·rollout이
+> `run_attempt != 1` 을 거부하고 candidate 이름도 이미 있으므로 재실행은 배포하지 못합니다. 관제실은 이 시도의
+> 보호 규칙 요청을 "Re-run blocked — reject only"로 표시하며 거부만 허용합니다. 남은 지역은 아래 **재개 모드**로 배포합니다.
+
+### 재개 모드 (실패 지역부터 이어서 배포)
+
+일부 지역만 성공하고 실패·취소된 release를, 성공한 지역을 다시 배포하지 않고 이어서 배포하는 **새 release run**입니다.
+보통 [관제실](07-deployment-dashboard.md#실패-지역부터-재개)의 `실패 지역부터 재개`로 시작하며, 관제실이 시작 지역과 profile을
+결정합니다. 결정 배경: [ADR 0001](../docs/adr/0001-rerun-prohibition-and-region-resume.md).
+
+`resume_from_run_id` 가 비어 있지 않으면:
+
+1. `build` 를 건너뛰고 **promote job**(environment `build`, 10분 제한, `actions: read`)이 실행됩니다.
+   1. `run_attempt == 1` 확인 (재실행 거부)
+   2. `python scripts/promote_source.py verify` – 원본이 이 저장소의 `release.yml`, `workflow_dispatch`, `main`, `completed`
+      run인지, `start_region` 앞의 모든 지역 rollout job(`korea / rollout` 등)이 원본의 **최근 시도**에서 `success` 인지 확인하고 원본 `sha` 출력
+   3. 원본 run의 `release-<resume_from_run_id>` artifact 다운로드
+   4. `python scripts/promote_source.py rebind` – 원본 `release.json` 의 repository/run/commit이 검증된 원본과 같고,
+      이미지가 `<ACR_NAME>.azurecr.io/safe-demo@sha256:...` digest인지 확인한 뒤 **이미지는 그대로**, `run_id`/`commit` 은
+      이 run 값으로, `source_run_id` 를 추가한 `release.json` 생성
+   5. `release-<run_id>` artifact 업로드 (90일)
+2. 지역 job은 `start_region` 부터 실행되고, 그 뒤 지역은 이 run의 앞 지역이 성공해야 실행됩니다. 시작 지역 앞의 지역은 건너뜁니다.
+3. 새 run은 시도 1, 새 run ID·candidate·baseline을 쓰므로 `region.yml`·`snapshot.py`·`rollout.py` 와 지역별 승인이 그대로 적용됩니다.
+
+주의:
+
+- workflow·스크립트는 **현재 `main`** 의 코드로 실행되고, 배포 이미지는 원본 run의 것입니다.
+- 재개 run은 원본으로 쓰지 않습니다. 관제실이 거부하며, 앞 지역을 건너뛴 run은 promote 검증에서도 실패합니다. 처음 원본 run에서 재개합니다.
+- `release-kr.yml` run은 원본으로 쓸 수 없습니다.
+
+PowerShell (관제실을 쓸 수 없고 별도 승인 경로가 유효할 때만):
+
+```powershell
+gh workflow run release.yml --repo $repo --ref main `
+  -f profile=demo -f resume_from_run_id=<원본 RELEASE_RUN_ID> -f start_region=usw
+```
 
 ## 2.2.1 `release-kr.yml` – 빌드 + KR만 (빠른 무중단 검증)
 
@@ -165,7 +203,7 @@ Azure 로그인은 하지 않습니다. 이 결과가 `configure-identity` 의 �
 
 | Artifact | 생성 위치 | 내용 | 보존 |
 | --- | --- | --- | --- |
-| `release-<run>` | build | `release.json` (image digest, run, repo, commit) | 90일 |
+| `release-<run>` | build / promote(재개) | `release.json` (image digest, run, repo, commit; 재개 시 `source_run_id`) | 90일 |
 | `baseline-<run>-<region>` | region | `baseline-<region>.json` – 복구의 유일한 근거 | 90일 |
 | `evidence-<run>-<region>-<attempt>` | region | `evidence\<region>\*.json` | 90일 |
 | `restore-evidence-<run>-<region>-<attempt>` | restore-region | `manual-rollback.json` 등 | 90일 |

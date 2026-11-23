@@ -80,7 +80,7 @@ az containerapp revision list -g "$prefix-kr" -n "$prefix-kr-app" `
 | 상황 | 의미 | 후속 작업 |
 | --- | --- | --- |
 | 모든 job 성공 | 3개 지역 candidate 100% | 이전 revision은 0%로 활성 유지(포렌식용). 필요 시 별도 정리 |
-| 지역 X job 실패, 로그에 `Restored exact baseline traffic` | X 자동 복구 완료, 이후 지역 미실행 | evidence 분석 → 수정 후 **새 release** |
+| 지역 X job 실패, 로그에 `Restored exact baseline traffic` | X 자동 복구 완료, 이후 지역 미실행 | evidence 분석 → 수정 후 **새 release**. 같은 이미지로 X부터 이어서 배포하려면 관제실 `실패 지역부터 재개`([7장](07-deployment-dashboard.md#실패-지역부터-재개)). GitHub "Re-run"은 사용 금지 |
 | 지역 X 실패, `ROLLBACK NOT VERIFIED` | 자동 복구 실패 | **즉시 4.4 수동 복구** |
 | 지역 X 실패, `mutation-intent` 없음 | preflight 단계 실패, Azure 변경 없음 | 원인(drift, stable 비정상, baseline SLO) 해결 |
 | run 취소/runner 유실 | 복구 보장 없음 | run이 `completed` 된 후 4.4 수동 복구 |

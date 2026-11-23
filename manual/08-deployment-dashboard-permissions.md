@@ -11,7 +11,7 @@
 | ACR 이미지 게시 | 게시자만 일반 RBAC 레지스트리에 `AcrPush`, ABAC 레지스트리에 저장소 조건부 `Container Registry Repository Writer`. `az acr build`를 쓰면 레지스트리의 Quick Build 실행·상태 조회 권한(`Container Registry Tasks Contributor` 또는 동등 권한)도 확인한다. 런타임에는 게시 권한을 주지 않는다. | 일회성 게시 권한 회수 |
 | Key Vault 초기화 | RBAC 기반 Vault의 비밀 작성자에 `Key Vault Secrets Officer`, RSA PEM 가져오기 담당자에 `Key Vault Crypto Officer` 또는 `keys/import/action` 및 필요한 조회 권한. 신규 객체 생성에 Vault 범위가 필요하면 임시로 사용한다. **이 구성의 RSA key import에 `Certificates Officer`는 필요하지 않다.** | 서명·비밀 해석 검증 후 임시 가져오기 권한 회수 |
 | Entra 등록과 할당 | 테넌트 앱 등록 정책에 따른 권한과 앱 소유권. Enterprise Application의 할당 필수·앱 역할 할당은 해당 앱을 관리할 수 있는 소유자/관리자가, 관리자 동의가 필요한 경우에는 적격 Entra 관리자가 처리한다. Single-tenant 웹 앱에 Console의 `/.auth/login/aad/callback`, ID token 발급, `ReleaseOperator`/`ReleaseApprover`를 구성한다. | 관리자 역할을 사용자나 앱 런타임에 상시 부여하지 않는다. |
-| GitHub 설정 | App 소유자 및 저장소 관리자: 대상 저장소에만 App 설치, `Actions: read/write`, `Deployments: read/write`, `Deployment protection rule`, `Workflow run`(`workflow_run`), `Workflow job`(`workflow_job`) 이벤트 구독, Receiver URL과 서명 비밀 등록, 환경별 App 규칙 및 브랜치 제한 확인. | 운영 사용자에게 App 소유권이나 저장소 관리자 권한을 일괄 부여하지 않는다. |
+| GitHub 설정 | App 소유자 및 저장소 관리자: 대상 저장소에만 App 설치, `Actions: read/write`, `Deployments: read/write`, 웹훅 이벤트 **`Deployment protection rule`, `Workflow runs`(`workflow_run`), `Workflow jobs`(`workflow_job`) 세 가지 모두** 구독(보호 규칙 이벤트가 없으면 승인 대기가 표시되지 않고, 두 workflow 이벤트가 없으면 실시간 변경 알림 없이 폴링만 동작하며 실행 중 `변경 알림` 칩이 오래됨으로 표시됨; 추가 권한 불필요), Receiver URL과 서명 비밀 등록, 환경별 App 규칙 및 브랜치 제한 확인. | 운영 사용자에게 App 소유권이나 저장소 관리자 권한을 일괄 부여하지 않는다. |
 
 ## 2. 상시 런타임 권한
 
@@ -21,7 +21,7 @@
 | Console 관리 ID | 모니터링할 각 ACA 리소스에 `Reader`; 로그인 비밀 및 SAS URL 비밀에 각각 `Key Vault Secrets User`; GitHub App 키 하나에 `Microsoft.KeyVault/vaults/keys/sign/action`만 가진 사용자 지정 역할; `dashboardops` 테이블에 `Storage Table Data Contributor`, `dashboardinbox` 테이블에 `Storage Table Data Reader`. Azure 대상 앱 쓰기 권한은 부여하지 않는다. |
 | Receiver 관리 ID | 웹훅 비밀 하나에 `Key Vault Secrets User`; `dashboardinbox` 테이블에 `Microsoft.Storage/storageAccounts/tableServices/tables/entities/add/action`만 가진 역할. GitHub 서명, 운영 테이블, Azure 배포 권한은 부여하지 않는다. |
 | GitHub Actions OIDC ID | 별도 ID에 대상 ACA별 `Container Apps Contributor` 또는 검증된 더 좁은 역할. 기존 워크플로가 Log Analytics 쿼리를 게이트에 사용하면 해당 워크스페이스에 필요한 조회 권한만 추가한다. 워크플로의 `id-token: write`와 실제 발급 `iss`/`aud`/`sub`에 일치하는 자격 증명을 구성한다. 저장소 및 환경 이름을 추정해 subject를 만들지 않는다. |
-| 운영 사용자 | `ReleaseOperator`: 배포 요청·실행 취소·롤백·Retire 요청. `ReleaseApprover`: 다른 사용자 요청의 App 승인·거부. 두 역할이 있어도 자기 요청은 승인할 수 없다. |
+| 운영 사용자 | `ReleaseOperator`: 배포 요청·실행 취소·롤백·Retire·실패 지역부터 재개 요청. `ReleaseApprover`: 다른 사용자 요청의 App 승인·거부. 두 역할이 있어도 자기 요청은 승인할 수 없다. |
 
 ## 3. SAS 갱신에 유지할 권한
 
@@ -32,7 +32,7 @@
 ## 4. 가동 확인과 회수
 
 1. 새 브라우저의 Entra 로그인과 배포 목록, Receiver의 서명된 GitHub `ping` 응답 `204`, 권한 없는 요청 거부를 확인한다. `ping`만으로 승인 경로를 입증하지 않는다.
-2. 격리 환경에서 **관제실 요청 → 서명된 보호 규칙 이벤트 → 다른 `ReleaseApprover`의 승인 → 배포**, 롤백과 별도 Retire를 검증한다. App-only 운영에서는 `Required reviewers`를 추가하지 않되 **각 환경에 올바른 App 규칙을 활성화**한다. 기존 브랜치 제한은 유지한다. CLI/GitHub에서 직접 시작해 관제실 요청 기록이 없는 실행은 관제실에서 승인할 수 없다.
+2. 격리 환경에서 **관제실 요청 → 서명된 보호 규칙 이벤트 → 다른 `ReleaseApprover`의 승인 → 배포**, 롤백과 별도 Retire, 실패 지역부터 재개를 검증한다. 실행 중 Receiver에 `workflow_run`/`workflow_job` delivery가 도착하는지 GitHub App의 최근 배달에서 확인한다. App-only 운영에서는 `Required reviewers`를 추가하지 않되 **각 환경에 올바른 App 규칙을 활성화**한다. 기존 브랜치 제한은 유지한다. CLI/GitHub에서 직접 시작해 관제실 요청 기록이 없는 실행은 관제실에서 승인할 수 없다.
 3. 설치·키 가져오기에 부여한 임시 역할의 **할당 ID**를 기록하고 가동 검증 후 해당 ID만 회수한다. 런타임 관리 ID, 활성 SAS 발급자, 별도 승인된 상시 권한은 회수 대상이 아니다.
 
 참고: [관제실 운영 가이드](07-deployment-dashboard.md) · [Azure Key Vault RBAC](https://learn.microsoft.com/azure/key-vault/general/rbac-guide) · [Azure ACR 역할](https://learn.microsoft.com/azure/container-registry/container-registry-rbac-built-in-roles-directory-reference) · [ACA 토큰 저장소](https://learn.microsoft.com/azure/container-apps/token-store) · [GitHub App 보호 규칙](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/configure-custom-protection-rules).

@@ -71,9 +71,9 @@ curl.exe -s https://<APP FQDN>/api/version   # version, revision, dnsSuffix 필�
 
 | 확인 | 명령 / 위치 | 기대값 |
 | --- | --- | --- |
-| 환경 변수 | `gh variable list --env prod-kr --repo <repo>` | `AZURE_CLIENT_ID` = `safeaca-identity` RG의 UAMI client ID |
-| branch 제한 | Settings → Environments | 7개 환경 모두 `main` 만 |
-| 승인자 | Settings → Environments → `prod-*` | Required reviewers 지정 |
+| 환경 변수 | `gh variable list --env retire-kr --repo <repo>` (`prod-kr`와 비교) | 두 환경의 `AZURE_CLIENT_ID` = 지역 UAMI client ID |
+| branch 제한 | Settings → Environments | `prod-kr`, `retire-kr` 모두 `main` 만 |
+| retire 승인자 | Settings → Environments → `retire-kr` | Required reviewers 지정 |
 | main 보호 | Settings → Branches | PR 필수, force-push/삭제 금지 |
 
 > 실습 중 Entra 앱(service principal) 로그인이 Conditional Access로 차단(`AADSTS53003`)되어
@@ -88,7 +88,7 @@ curl.exe -s https://<APP FQDN>/api/version   # version, revision, dnsSuffix 필�
 | 2 | Actions → run → **Review deployments** → `prod-kr` 승인 | 10% → 50% → 100% 동안 스트립 두 색 혼합 → v2 색. **오류 0** |
 | 3 | `prod-sea`, `prod-usw` 도 승인하고 **run 전체 완료**까지 대기 | v2 카드 등장, v1 카드 트래픽 0%·`SERVING` |
 | 4 | v1 카드 **"긴 작업 시작"** 클릭 (또는 6.4-C curl로 v1 revision FQDN 호출) | 진행 막대 `0s / 약 120s` |
-| 5 | 바로 retire 실행 후 `prod-kr` 승인 (아래) | — |
+| 5 | 바로 retire 실행 후 GitHub Actions에서 `retire-kr` 승인 (아래) | — |
 | 6 | deactivate → v1 replica SIGTERM | v1 카드 `DRAINING`, ready ✗, grace 30s부터 감소 |
 | 7 | 작업 종료 시 | 기본(`Y`)은 즉시 `중단 응답 … task_incompleted`, 약 2초 뒤 v1 카드 `STOPPED`. `N`이고 종료 시한 전에 완료되면 `완료 … task_completed · drainObserved: 예` |
 | 8 | 결과 정리 | 스트립에 빨강 없음, 오류 카운터 0 |
@@ -106,12 +106,12 @@ gh run watch $rid --repo <repo>             # 승인은 GitHub UI에서
 
 | 인자 | 의미 |
 | --- | --- |
-| `--ref main` | workflow 와 `prod-kr` 환경 모두 `main` 만 허용 |
+| `--ref main` | workflow 와 `retire-kr` 환경 모두 `main` 만 허용 |
 | `source_run_id` | v2를 배포한 release run. 그 run의 `baseline-<run>-kr` artifact에 기록된 **배포 직전 stable revision(v1)** 이 retire 대상 |
 | `region` | 한 지역만. `/verify` 를 연 지역과 같아야 함 |
 
-workflow 내부: `check_source.py`(완료된 main release인지) → baseline·`success.json` 다운로드 →
-출처(commit, run) 일치 확인 → `prod-kr` 승인 → UAMI 로그인 → `retire.py`(drift 확인 →
+workflow 내부: `retire-kr` 승인 → `check_source.py`(완료된 main release인지) →
+baseline·`success.json` 다운로드 → 출처(commit, run) 일치 확인 → UAMI 로그인 → `retire.py`(drift 확인 →
 v1 deactivate → v2 응답 확인) → `demo-retire-evidence-<run>-kr` 업로드(90일).
 
 **타이밍 규칙**
@@ -171,9 +171,10 @@ gh run view $release --repo $repo --json status,conclusion
 gh workflow run demo-retire.yml --repo $repo --ref main -f source_run_id=$release -f region=kr
 Start-Sleep 5
 $retire = gh run list --repo $repo --workflow demo-retire.yml -L 1 --json databaseId -q '.[0].databaseId'
+$retireEnvId = gh api "repos/$repo/environments/retire-kr" -q .id
 do { Start-Sleep 10; $pending = gh api "repos/$repo/actions/runs/$retire/pending_deployments" -q 'length' } while ($pending -eq '0')
 gh api -X POST "repos/$repo/actions/runs/$retire/pending_deployments" `
-  -F "environment_ids[]=$envId" -f state=approved -f comment='quick demo retire' | Out-Null
+  -F "environment_ids[]=$retireEnvId" -f state=approved -f comment='quick demo retire' | Out-Null
 gh run watch $retire --repo $repo --exit-status
 ```
 
@@ -205,9 +206,10 @@ gh run view "$release" --repo "$repo" --json status,conclusion
 gh workflow run demo-retire.yml --repo "$repo" --ref main -f source_run_id="$release" -f region=kr
 sleep 5
 retire=$(gh run list --repo "$repo" --workflow demo-retire.yml -L 1 --json databaseId -q '.[0].databaseId')
+retire_env_id=$(gh api "repos/$repo/environments/retire-kr" -q .id)
 until [ "$(gh api "repos/$repo/actions/runs/$retire/pending_deployments" -q 'length')" != 0 ]; do sleep 10; done
 gh api -X POST "repos/$repo/actions/runs/$retire/pending_deployments" \
-  -F "environment_ids[]=$env_id" -f state=approved -f comment='quick demo retire' >/dev/null
+  -F "environment_ids[]=$retire_env_id" -f state=approved -f comment='quick demo retire' >/dev/null
 gh run watch "$retire" --repo "$repo" --exit-status
 ```
 

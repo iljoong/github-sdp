@@ -234,7 +234,7 @@ scripts/configure-identity.sh --repository "$repo" --environment prod-kr \
 | --- | --- | --- |
 | `ACTIONS_ID_TOKEN_REQUEST_URL`, `ACTIONS_ID_TOKEN_REQUEST_TOKEN` | GitHub (`id-token: write`) | OIDC 토큰 요청 엔드포인트 |
 | `GITHUB_REPOSITORY` | GitHub | 저장소 검증 |
-| `INSPECT_ENVIRONMENT` | workflow matrix | 7개 허용 환경 중 하나 |
+| `INSPECT_ENVIRONMENT` | workflow matrix | `build`, `prod-*`, `prod-rollback-*`, `retire-*` 중 허용된 환경 |
 
 ### 추출 claim
 

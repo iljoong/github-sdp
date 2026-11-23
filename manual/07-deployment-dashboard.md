@@ -3,6 +3,7 @@
 관제실은 별도 Azure Container App입니다. 운영자는 **Build → KR → SEA → USW**를 따라 실행, 지역 승인, Azure 트래픽·리비전·레플리카를 봅니다. `/verify`와 같은 JSON endpoint를 읽되 HTTP에 응답한 표본을 Azure 인벤토리와 구분합니다. 주요 ENV는 허용 목록만 표시합니다. 승인 대기와 Azure 트래픽 100%는 서로 다른 정보입니다.
 
 관제실은 기존 `release.yml`, `restore.yml`, `demo-retire.yml`에 요청합니다. Azure 쓰기는 기존 워크플로의 OIDC 및 안전 스크립트가 담당합니다. 진행 중 원본의 롤백, 전체 지역 롤백, 운영 프로필의 retire와 비활성 리비전 재활성화는 관제실에서 지원하지 않습니다.
+retire는 관제실에서 실행을 요청하고 상태를 볼 수 있지만, `retire-*` 승인은 GitHub Actions에서 처리합니다.
 
 > ⚠️ **릴리스에 GitHub의 "Re-run jobs"/"Re-run failed jobs"를 사용하지 마세요.** 배포 job은 첫 시도(`run_attempt == 1`)만 허용하므로 재실행은 배포하지 못하고 승인 대기에 걸립니다. 실패한 릴리스를 이어서 배포하려면 관제실의 **실패 지역부터 재개**(아래 [재개](#실패-지역부터-재개))를 사용합니다. 배경은 [ADR 0001](../docs/adr/0001-rerun-prohibition-and-region-resume.md)을 참고하세요.
 

@@ -19,10 +19,10 @@ restore.yml (workflow_dispatch, source_run_id, region)
  ├─ southeastasia → restore-region.yml environment: prod-rollback-sea (always)
  └─ korea         → restore-region.yml environment: prod-rollback-kr  (always)
 
-oidc-inspect.yml (workflow_dispatch) – 7개 environment matrix, Azure 접근 없음
+oidc-inspect.yml (workflow_dispatch) – 기존/retire 환경 OIDC 검사, 선택적 Azure 읽기 검증
 
 demo-retire.yml (workflow_dispatch, source_run_id, region) – 데모 전용
- └─ retire        environment: prod-<region>  (release 완료 후, 이전 revision 비활성화)
+ └─ retire        environment: retire-<region>  (release 완료 후, 이전 revision 비활성화)
 ```
 
 ## 2.2 `release.yml` – 릴리스 진입점
@@ -175,9 +175,18 @@ job 제한 시간은 240분입니다(production 3단계 × 1시간 + 대기 여�
 
 ## 2.5 `oidc-inspect.yml` – OIDC claim 수집
 
-7개 environment(`build`, `prod-*`, `prod-rollback-*`)에서 실제 OIDC 토큰을 요청하여
-허용된 claim metadata만 `oidc-claims-<run_id>-<env>` artifact(7일)로 저장합니다.
-Azure 로그인은 하지 않습니다. 이 결과가 `configure-identity` 의 입력입니다.
+실제 OIDC 토큰을 요청하고 허용된 claim metadata만
+`oidc-claims-<run_id>-<env>` artifact(7일)로 저장합니다. 토큰 원문은 저장하지 않습니다.
+
+| `mode` | 대상과 동작 |
+| --- | --- |
+| `existing-claims` (기본값) | `build`, `prod-*`, `prod-rollback-*` 7개 환경의 claim 수집만 수행 (`configure-identity` 입력) |
+| `retire-claims` | `retire-kr`, `retire-sea`, `retire-usw` 승인 후 claim 수집만 수행 |
+| `retire-login` | 같은 retire 환경에서 claim 수집 후 Azure 로그인 및 대상 Container App 읽기 전용 조회 |
+
+`retire-claims`에서 수집한 실제 `sub`를 사용해 각 지역의 기존 관리 ID에 retire용
+federated credential을 **추가**합니다. release용 `prod-*` credential은 그대로 둡니다.
+그다음 `retire-login`을 실행해 리비전을 비활성화하지 않고 로그인을 검증합니다.
 
 ## 2.5.1 `demo-retire.yml` – 데모 전용 이전 revision 비활성화
 
@@ -189,10 +198,10 @@ Azure 로그인은 하지 않습니다. 이 결과가 `configure-identity` 의 �
 | --- | --- |
 | 입력 | `source_run_id`(완료된 release run), `region` = `kr` / `sea` / `usw` (한 지역만, `all` 없음) |
 | 동시성 | `safe-aca-production`, `cancel-in-progress: false` (release/restore와 직렬) |
-| environment | `prod-<region>` (배포 identity 재사용, 승인 필요) |
+| environment | `retire-<region>` (배포 identity 재사용, retire 전용 OIDC credential과 GitHub Actions 승인 필요) |
 | 제한 | `main` 에서만, 15분 |
 
-단계: `check_source.py` → 원본 run의 `baseline-<run>-<region>` 과
+단계: `retire-<region>` 승인 → `check_source.py` → 원본 run의 `baseline-<run>-<region>` 과
 `evidence-<run>-<region>-1` 다운로드 → snapshot의 commit/run 바인딩 확인 → `azure/login` →
 `python scripts/retire.py --snapshot ... --success .../success.json` →
 `demo-retire-evidence-<run>-<region>` 업로드.

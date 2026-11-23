@@ -11,6 +11,8 @@ const statuses = {
 };
 const labels = {deploy: "새 배포", cancel: "배포 취소", rollback: "롤백 요청",
                 retire: "이전 리비전 종료", approve: "승인", reject: "거부"};
+// Inbox reason for a protection rule raised by a GitHub re-run (attempt > 1): approve is refused, reject allowed.
+const RERUN = "Re-run blocked — reject only";
 const descriptions = {
   deploy: "main 브랜치에서 시작합니다. 각 지역은 별도 운영자의 승인이 필요합니다.",
   cancel: "릴리스를 취소합니다. 취소만으로 트래픽이 복구되었다고 볼 수 없습니다.",
@@ -37,7 +39,8 @@ const reasonText = {
   "Current traffic belongs to a different release": "현재 트래픽이 다른 릴리스에 연결되어 있습니다.",
   "Retire requires verified demo evidence and candidate traffic at 100%": "검증된 demo 증거와 후보 트래픽 100%가 필요합니다.",
   "The candidate is not verified healthy": "후보 리비전의 헬스를 확인할 수 없습니다.",
-  "Select this release to verify its recovery evidence": "이 릴리스를 선택하면 복구 근거를 확인합니다."
+  "Select this release to verify its recovery evidence": "이 릴리스를 선택하면 복구 근거를 확인합니다.",
+  [RERUN]: "GitHub 재실행(Re-run)은 배포할 수 없어 승인할 수 없습니다. 거부하면 GitHub 실행이 즉시 종료됩니다."
 };
 const allowedBecause = {
   rollback: "검증된 기준 스냅샷 · 이전 리비전 활성/정상 · 현재 트래픽이 이 릴리스에 속함",
@@ -322,6 +325,7 @@ function historyEntry({entry, current}) {
   if (current) item.setAttribute("aria-current", "true");
   const head = node("div"); head.className = "spread";
   head.append(node("strong", `#${entry.id} · ${label(entry.conclusion || entry.status)}`));
+  if (entry.run_attempt > 1) head.append(rerunBadge(entry.run_attempt));
   if (!current) {
     const pick = node("button", "선택"); pick.type = "button"; pick.className = "select";
     pick.setAttribute("aria-label", `릴리스 #${entry.id} 선택`);
@@ -350,7 +354,7 @@ function releaseEntries(snapshot) {
   return [...rows].map(([id, row]) => [id, {
     id, current: id === current, state: row.conclusion || row.status || "unknown", title: row.display_title,
     profile: row.profile, commit: (row.commit ?? row.head_sha)?.slice(0, 7), started: row.started_at ?? row.created_at,
-    requester: row.requester
+    requester: row.requester, attempt: row.run_attempt
   }]);
 }
 
@@ -364,6 +368,7 @@ function releaseItem(row) {
   const dot = node("span"); dot.className = "dot"; dot.setAttribute("aria-hidden", "true");
   const state = node("span", label(row.state)); state.className = "release-state";
   top.append(dot, node("strong", `#${row.id}`), state);
+  if (row.attempt > 1) top.append(rerunBadge(row.attempt));
   const name = node("span", row.title || "이름 미확인"); name.className = "release-name";
   const meta = node("small", `${row.profile ?? "프로필 미확인"} · ${row.commit ?? "커밋 미확인"} · `);
   const started = node("time", ago(row.started));
@@ -377,11 +382,13 @@ function releaseItem(row) {
 function timelineEntry(event) {
   const item = node("li");
   item.dataset.kind = event.kind;
+  // Approval requests and decisions belong to one run attempt; name it once the release was re-run.
+  const attempt = event.attempt && event.rerun ? ` · 시도 ${event.attempt}` : "";
   const title = event.kind === "job_started" ? `${event.name} ${eventText.job_started}`
     : event.kind === "job_completed" ? `${event.name} ${label(event.status)}`
-    : event.kind === "approval_requested" ? `${event.environment} ${eventText.approval_requested}`
+    : event.kind === "approval_requested" ? `${event.environment} ${eventText.approval_requested}${attempt}`
     : [labels[event.kind] ?? event.kind, event.environment ?? (event.region ? `prod-${event.region}` : null), label(event.status)]
-      .filter(Boolean).join(" · ");
+      .filter(Boolean).join(" · ") + attempt;
   item.append(node("span", title), node("small", timestamp(event.at)));
   if (event.actor || event.actor_name) {
     item.append(node("small", [event.actor_name, event.actor ? `Entra 사용자 ${event.actor}` : null].filter(Boolean).join(" · ")));
@@ -401,7 +408,19 @@ function commandButton(kind, reason, runId, gate, explain = true) {
   return container;
 }
 
-function gateKey(gate) { return `${gate.operation_id}:${gate.environment}`; }
+function gateKey(gate) {
+  // Each run attempt raises its own gate; attempt 1 keeps the original key.
+  return `${gate.operation_id}:${gate.environment}` + (gate.run_attempt > 1 ? `:${gate.run_attempt}` : "");
+}
+
+// Gates the signed-in user can act on: approvable ones, and re-run gates that only need a rejection.
+function actionable(gate) { return !gate.reason || (gate.rerun && gate.reason === RERUN); }
+
+function rerunBadge(attempt) {
+  const badge = node("span", `재실행 · 시도 ${attempt}`); badge.className = "rerun";
+  badge.title = "GitHub에서 다시 실행된 릴리스입니다. 재실행은 배포할 수 없습니다.";
+  return badge;
+}
 
 function inboxItems() {
   const now = Date.now();
@@ -411,8 +430,11 @@ function inboxItems() {
 
 function inboxEntry(gate) {
   const item = node("li"); item.className = "request";
+  if (gate.rerun) item.dataset.rerun = "1";
   const kind = gate.kind === "deploy" ? "배포" : labels[gate.kind] ?? gate.kind;
-  item.append(node("h3", `${gate.environment} 승인 대기`),
+  const heading = node("h3", `${gate.environment} 승인 대기`);
+  if (gate.rerun) heading.append(" ", rerunBadge(gate.run_attempt));
+  item.append(heading,
     node("p", `${regionNames[gate.region] ?? gate.region} · ${kind} · GitHub 실행 #${gate.run_id}` +
       (gate.source_run_id ? ` · 원본 릴리스 #${gate.source_run_id}` : "")));
   if (gate.reason) {
@@ -420,7 +442,9 @@ function inboxEntry(gate) {
     item.append(why);
   }
   const actions = node("div"); actions.className = "actions";
-  actions.append(...["approve", "reject"].map(kind => commandButton(kind, gate.reason, gate.run_id, gate, false)));
+  const rejectOnly = gate.rerun && gate.reason === RERUN;
+  actions.append(commandButton("approve", gate.reason, gate.run_id, gate, false),
+    commandButton("reject", rejectOnly ? null : gate.reason, gate.run_id, gate, false));
   item.append(actions);
   return item;
 }
@@ -431,18 +455,19 @@ function renderInbox() {
   enableCommands();
   $("inbox-empty").hidden = items.length > 0;
   $("inbox-truncated").hidden = !data?.inbox_truncated;
-  const mine = items.filter(gate => !gate.reason);
-  $("inbox-title").textContent = items.length ? `승인 대기 ${items.length}건 · 내가 승인 가능 ${mine.length}건` : "승인 대기";
+  const mine = items.filter(actionable);
+  $("inbox-title").textContent = items.length ? `승인 대기 ${items.length}건 · 내가 처리 가능 ${mine.length}건` : "승인 대기";
   $("inbox-count").textContent = items.length ? String(items.length) : "";
   // The tab stands out while the signed-in user can decide a gate, whichever tab is open.
   $("tab-inbox").toggleAttribute("data-attention", mine.length > 0);
-  $("tab-inbox").title = mine.length ? `내가 승인 가능 ${mine.length}건` : "";
+  $("tab-inbox").title = mine.length ? `내가 처리 가능 ${mine.length}건` : "";
   document.title = mine.length ? `(${mine.length}) ${baseTitle}` : baseTitle;
   const keys = new Set(mine.map(gateKey));
   if (seenInbox && notificationsOn()) {
     for (const gate of mine) {
       if (seenInbox.has(gateKey(gate))) continue;
-      new Notification("배포 승인 요청", {body: `${gate.environment} · GitHub 실행 #${gate.run_id}`, tag: gateKey(gate)});
+      new Notification(gate.rerun ? "재실행 보호 규칙 거부 필요" : "배포 승인 요청",
+        {body: `${gate.environment} · GitHub 실행 #${gate.run_id}`, tag: gateKey(gate)});
     }
   }
   seenInbox = new Set([...(seenInbox ?? []), ...keys]);
@@ -453,6 +478,7 @@ function render(snapshot) {
   keyed($("releases"), releaseEntries(snapshot), releaseItem);
   $("release-title").textContent = run ? runTitle(run) : "선택 가능한 릴리스 없음";
   $("meta").textContent = run ? `#${run.id} · main · ${run.profile || "프로필 미확인"} · ${run.head_sha?.slice(0, 7) ?? "SHA 미확인"} · ${label(run.conclusion || run.status)}` : "";
+  if (run?.run_attempt > 1) $("meta").append(" ", rerunBadge(run.run_attempt));
   const link = $("github");
   link.hidden = !run?.url;
   if (run?.url) link.href = run.url;
@@ -502,7 +528,7 @@ function render(snapshot) {
   keyed($("timeline"), (snapshot.timeline ?? []).map(event => {
     const base = [event.at, event.kind, event.name, event.environment, event.actor].join("|");
     seen.set(base, (seen.get(base) ?? 0) + 1);
-    return [`${base}|${seen.get(base)}`, event];
+    return [`${base}|${seen.get(base)}`, {...event, rerun: run?.run_attempt > 1}];
   }), timelineEntry);
   renderInbox();
   tick();

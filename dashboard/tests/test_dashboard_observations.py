@@ -256,6 +256,7 @@ class Console:
                      "created_at": iso(T0)}]
         self.weights, self.azure_age, self.sample_age, self.azure_down = {}, {}, 0, set()
         self.audit_down = False
+        self.claims = set()
         self.cache = ReadCache(self._send, clock=lambda: self.now)
 
         def recent():
@@ -263,7 +264,7 @@ class Console:
                 raise ValueError("table unavailable")
             return self.ops
 
-        store = SimpleNamespace(recent=recent, unresolved=lambda: False, claimed=lambda _: False,
+        store = SimpleNamespace(recent=recent, unresolved=lambda: False, claimed=lambda claim: claim in self.claims,
                                 by_run=lambda run_id: next((op for op in self.ops if op.get("run_id") == run_id), None))
         self.reader = DashboardReader(
             SimpleNamespace(repo="owner/repo", repo_id=12), TARGETS, GitHub("owner/repo", lambda: "t", self.cache),
@@ -278,9 +279,14 @@ class Console:
             return 200, {}, {"workflow_runs": [run for run in self.runs.values() if run["path"].endswith("release.yml")]}
         if path.startswith("/runs?"):
             return 200, {}, {"workflow_runs": [run for run in self.runs.values() if run["status"] != "completed"]}
-        match = re.fullmatch(r"/runs/(\d+)(/attempts/1/jobs\?.*)?", path)
+        match = re.fullmatch(r"/runs/(\d+)(/attempts/(\d+)/jobs\?.*)?", path)
         run_id = int(match.group(1))
-        return 200, {}, ({"jobs": self.jobs.get(run_id, [])} if match.group(2) else self.runs[run_id])
+        if not match.group(2):
+            return 200, {}, self.runs[run_id]
+        jobs = self.jobs.get(run_id, [])
+        # Jobs keyed by attempt model GitHub re-runs; a plain list is attempt 1.
+        return 200, {}, {"jobs": jobs.get(int(match.group(3)), []) if isinstance(jobs, dict) else
+                         jobs if match.group(3) == "1" else []}
 
     def _azure(self, target, run_id, detail, baseline):
         region = target.app_name.split("-", 1)[1]
@@ -355,7 +361,8 @@ class ApprovalInboxTests(unittest.TestCase):
         snapshot = console.snapshot(run_id=7, region="kr")
         self.assertEqual(snapshot["pending"], [])
         self.assertEqual(snapshot["inbox"], [{"operation_id": "o9", "run_id": 9, "kind": "deploy", "region": "sea",
-                                              "environment": "prod-sea", "reason": None, "source_run_id": None}])
+                                              "environment": "prod-sea", "reason": None, "source_run_id": None,
+                                              "run_attempt": 1, "rerun": False}])
         requester = SimpleNamespace(roles={"ReleaseApprover"}, object_id="requester")
         self.assertEqual(console.snapshot(run_id=7, region="usw", actor=requester)["inbox"][0]["reason"],
                          "A different Entra approver is required")
@@ -385,6 +392,63 @@ class ApprovalInboxTests(unittest.TestCase):
         snapshot = console.snapshot(run_id=7)
         self.assertEqual(len(snapshot["inbox"]), 10)
         self.assertTrue(snapshot["inbox_truncated"])
+
+
+class RerunGateTests(unittest.TestCase):
+    """A GitHub re-run (attempt > 1) of a console release raises a new protection rule request."""
+
+    @staticmethod
+    def rerun(console, run_id=9):
+        console.runs[run_id] = {**release_run(run_id, "waiting"), "run_attempt": 2, "run_started_at": iso(T0 - 600)}
+        console.jobs[run_id] = {1: [{"name": "westus / rollout", "status": "completed", "conclusion": "failure"}],
+                                2: [{"name": "westus / rollout", "status": "waiting"}]}
+        console.rules[run_id] = [{"environment": "prod-usw", "sha": SHA, "received_at": iso(T0 - 3000)},
+                                 {"environment": "prod-usw", "sha": SHA, "received_at": iso(T0 - 300)}]
+        console.ops.append({"operation_id": f"o{run_id}", "kind": "deploy", "status": "accepted", "run_id": run_id,
+                            "actor": "requester", "created_at": iso(T0 - 4000)})
+
+    def test_rerun_gate_is_listed_reject_only(self):
+        console = Console("completed")
+        self.rerun(console)
+        self.assertEqual(console.snapshot(run_id=7)["inbox"], [
+            {"operation_id": "o9", "run_id": 9, "kind": "deploy", "region": "usw", "environment": "prod-usw",
+             "reason": "Re-run blocked — reject only", "source_run_id": None, "run_attempt": 2, "rerun": True}])
+
+    def test_rule_request_received_before_the_current_attempt_started_is_ignored(self):
+        console = Console("completed")
+        self.rerun(console)
+        console.rules[9] = console.rules[9][:1]
+        self.assertEqual(console.snapshot(run_id=7)["inbox"], [])
+
+    def test_attempt_one_decision_does_not_hide_the_attempt_two_gate(self):
+        console = Console("completed")
+        self.rerun(console)
+        console.claims.add("review:9:prod-usw")
+        self.assertEqual([gate["run_attempt"] for gate in console.snapshot(run_id=7)["inbox"]], [2])
+        console.claims.add("review:9:prod-usw:2")
+        console.now += 10
+        self.assertEqual(console.snapshot(run_id=7)["inbox"], [])
+
+    def test_timeline_shows_approval_requests_and_decisions_per_attempt(self):
+        console = Console("completed")
+        self.rerun(console)
+        console.ops += [
+            {"operation_id": "d1", "kind": "approve", "status": "accepted", "source_run_id": 9,
+             "environment": "prod-usw", "actor": "a2", "created_at": iso(T0 - 2900)},
+            {"operation_id": "d2", "kind": "reject", "status": "accepted", "source_run_id": 9,
+             "environment": "prod-usw", "run_attempt": 2, "actor": "a2", "created_at": iso(T0 - 200)}]
+        timeline = console.snapshot(run_id=9)["timeline"]
+        self.assertEqual([(e["kind"], e["attempt"]) for e in timeline if e["environment"] == "prod-usw"], [
+            ("approval_requested", 1), ("approve", 1), ("approval_requested", 2), ("reject", 2)])
+
+    def test_selected_rerun_release_shows_its_attempt_and_rejects_approval_in_pending(self):
+        console = Console("completed")
+        self.rerun(console)
+        snapshot = console.snapshot(run_id=9, region="usw")
+        self.assertEqual(snapshot["run"]["run_attempt"], 2)
+        self.assertEqual(snapshot["history"][-1]["run_attempt"], 2)
+        self.assertEqual([(g["environment"], g["reason"], g["rerun"]) for g in snapshot["pending"]],
+                         [("prod-usw", "Re-run blocked — reject only", True)])
 
 
 class RegionProgressTests(unittest.TestCase):

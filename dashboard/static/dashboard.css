@@ -186,3 +186,4 @@ dialog footer { justify-content: flex-end }
   #account-alias { max-width: 6rem }
 }
 @media (max-width: 545px) { .rail { grid-template-columns: 1fr 1fr; gap: 8px } .station::after { display: none } .panel { padding: 12px } }
+.rerun { display: inline-block; border: 1px solid var(--warn-line); border-radius: 999px; padding: 0 8px; background: var(--warn-bg); color: var(--warn); font-size: .72rem; font-weight: 650; white-space: nowrap; vertical-align: middle }

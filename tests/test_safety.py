@@ -1068,7 +1068,9 @@ class SafetyTests(unittest.TestCase):
         for text in (release, restore, demo_retire):
             self.assertIn("group: safe-aca-production", text)
             self.assertIn("cancel-in-progress: false", text)
-        self.assertIn("environment: prod-${{ inputs.region }}", demo_retire)
+        self.assertIn("environment: retire-${{ inputs.region }}", demo_retire)
+        self.assertIn("if: github.ref == 'refs/heads/main'", demo_retire)
+        self.assertIn("options: [kr, sea, usw]", demo_retire)
         self.assertIn("check_source.py", demo_retire)
         self.assertIn("scripts/retire.py", demo_retire)
         self.assertNotIn("[all,", demo_retire)

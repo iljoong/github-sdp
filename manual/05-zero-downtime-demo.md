@@ -137,8 +137,8 @@ draining replica로 계속 라우팅되는지, 열려 있는 요청이 비활성
 | T0 | `https://<APP FQDN>/verify` 를 연다 | 큰 글자 v1(예: `r41`), 스트립이 v1 색으로 채워짐, v1 카드 `SERVING` |
 | T1 | `gh workflow run release.yml -f profile=demo` 후 kr 승인 (빠르게: `gh workflow run release-kr.yml`, KR만·quick 프로필) | 10% → 50% → 100% (quick: 50% → 100%) 동안 스트립이 두 색으로 섞이다가 v2 색으로 바뀜. **오류 0** |
 | T2 | release run이 **전체 완료**될 때까지 기다림 (sea, usw 승인 포함) | v2 카드 등장. v1 카드: 트래픽 0%, `SERVING`, ready ✓ |
-| T3 | `prod-kr` retire 승인 후, retire job이 deactivate 단계에 들어가기 직전에 v1 카드의 **"긴 작업 시작"** 클릭 | v1 카드에 진행 막대 `0s / 약 120s` |
-| T4 | (T3 전에) `demo-retire.yml` 실행 후 `prod-kr` 승인 (아래 명령) | — |
+| T3 | `retire-kr` 승인 후, retire job이 deactivate 단계에 들어가기 직전에 v1 카드의 **"긴 작업 시작"** 클릭 | v1 카드에 진행 막대 `0s / 약 120s` |
+| T4 | (T3 전에) `demo-retire.yml` 실행 후 GitHub Actions에서 `retire-kr` 승인 (아래 명령) | — |
 | T5 | (deactivate → v1 replica에 SIGTERM) | v1 카드 `DRAINING`, ready ✗, grace 남음 30s부터 감소 |
 | T6 | drain 후 | 기본(`Y`): 즉시 `중단 응답 … task_incompleted`, 약 2초 뒤 v1 카드 `STOPPED`. `N`이면 남은 작업과 종료 시한에 따라 `완료 … task_completed · drainObserved: 예` 또는 `실패 … 사유` |
 | T7 | 정리 | 스트립은 처음부터 끝까지 빨강 없음, 오류 카운터 0 |

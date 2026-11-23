@@ -56,7 +56,7 @@
 | `.github\workflows\region.yml` | 지역 1곳의 snapshot / rollout / cleanup / evidence 업로드 (재사용 workflow) |
 | `.github\workflows\restore.yml` | 수동 복구 진입점 (usw → sea → kr) |
 | `.github\workflows\restore-region.yml` | 지역 1곳의 복구 (재사용 workflow) |
-| `.github\workflows\oidc-inspect.yml` | Azure 접근 없이 환경별 OIDC claim만 수집 |
+| `.github\workflows\oidc-inspect.yml` | 환경별 OIDC claim 수집 및 선택적 retire Azure 읽기 검증 |
 | `.github\workflows\demo-retire.yml` | 데모 전용: 완료된 release의 이전 revision 비활성화 (SIGTERM 시연) |
 | `app\` | `/`(소개·endpoint 목록), `/healthz`, `/readyz`, `/work`, `/api/version`, `/status`, `/api/long-task`, `/verify` 를 제공하는 데모 앱 |
 | `dashboard\` | 별도 ACA 배포 관제실과 GitHub App webhook 수신기, 전용 테스트 |

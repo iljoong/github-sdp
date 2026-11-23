@@ -27,7 +27,7 @@ jobs:
   retire:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    environment: prod-${{ inputs.region }}
+    environment: retire-${{ inputs.region }}
     timeout-minutes: 15
     env:
       REGION: ${{ inputs.region }}

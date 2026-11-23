@@ -37,7 +37,7 @@ SWITCH_ACCOUNT = "/.auth/logout?" + urlencode({
 
 class OperationInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    action: Literal["deploy", "cancel", "rollback", "retire"]
+    action: Literal["deploy", "cancel", "rollback", "retire", "resume"]
     request_id: str
     source_run_id: int | None = None
     region: Literal["kr", "sea", "usw"] | None = None

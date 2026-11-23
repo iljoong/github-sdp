@@ -84,6 +84,15 @@ class DashboardHTTPTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/operations", json=command, headers=headers).status_code, 200)
         self.assertEqual(self.client.post("/api/operations", json={**command,"repo":"other/repo"}, headers=headers).status_code, 422)
 
+    def test_resume_is_posted_with_only_a_request_id_and_source_release(self):
+        headers = {**self.headers, "origin":"https://console.example.test","x-dashboard-write":"1"}
+        commands = []
+        self.client.app.state.operations.request = lambda actor, command: commands.append(command) or {"status": "accepted"}
+        resume = {"action":"resume","request_id":"83468040-d438-4007-bf2d-8068282a966d","source_run_id":7}
+        self.assertEqual(self.client.post("/api/operations", json=resume, headers=headers).status_code, 200)
+        self.assertEqual((commands[0].action, commands[0].source_run_id, commands[0].region), ("resume", 7, None))
+        self.assertEqual(self.client.post("/api/operations", json={**resume,"region":"usw"}, headers=headers).status_code, 422)
+
     def banner(self, response):
         header = re.search(r"<header\b.*?</header>", response.text, re.S).group(0)
         return ElementTree.fromstring(header)

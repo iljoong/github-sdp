@@ -331,6 +331,43 @@ class DashboardReader:
                 return True
         return False
 
+    def _resume(self, run, origin, jobs, observe, fresh=False):
+        """(reason, plan) for resuming a completed release from its first region not successful in the latest attempt.
+
+        `origin` is the source's audit row (or None); `observe(region, baseline)` returns the region's detailed
+        Azure observation. The plan holds the start region and the source's profile (default production).
+        """
+        if run.get("status") != "completed":
+            return "The original release must be completed", None
+        if run.get("conclusion") not in ("failure", "cancelled"):
+            return "Only a failed or cancelled release can be resumed", None
+        states = job_states(jobs, "deploy")
+        # A resume run skips build and its earlier regions, so promote_source.py would refuse it as a source.
+        if origin and origin.get("kind") == "deploy" and origin.get("source_run_id"):
+            return f"This release was resumed from release {positive(origin['source_run_id'])}; resume that source release instead", None
+        if states["build"] == "skipped":
+            return "This release was itself a resume; resume its source release instead", None
+        if states["build"] != "success":
+            return "The source release did not build an image", None
+        start = next((region for region in REGIONS if states[region] != "success"), None)
+        if start is None:
+            return "Every region already succeeded", None
+        later = REGIONS[REGIONS.index(start) + 1:]
+        if states[start] == "unknown" or any(states[r] not in ("not_started", "skipped", "cancelled") for r in later):
+            return "An earlier region did not succeed in the latest attempt", None
+        baseline = self.baseline(run, start, fresh=fresh)
+        azure = observe(start, baseline)
+        live = [name for name, weight in azure.get("traffic", {}).items() if weight]
+        rows = {row["name"]: row for row in azure.get("revisions") or ()}
+        if (len(live) != 1 or azure["traffic"][live[0]] != 100 or rows.get(live[0], {}).get("active") is not True
+                or rows[live[0]].get("health") != "Healthy"):
+            return "The start region's traffic is not on exactly one healthy revision at 100%", None
+        # Without a captured baseline (region never snapshotted) the live revision becomes the new run's baseline.
+        if baseline and live[0] not in (baseline["stable"], baseline["candidate"]):
+            return "Current traffic belongs to a different release", None
+        profile = (origin or {}).get("profile")
+        return None, {"start_region": start, "profile": profile if profile in ("demo", "production") else "production"}
+
     def _active(self):
         return bool(self.github.active_runs())
 
@@ -346,6 +383,14 @@ class DashboardReader:
             if run.get("status") == "completed":
                 raise InvalidAction("This release has already completed")
             return
+        if command.action == "resume":
+            # Uncached at write time: latest-attempt jobs, audit row, fresh baseline and live Azure detail.
+            reason, plan = self._resume(
+                run, self.store.by_run(run["id"]), self.github.jobs(run["id"], run["run_attempt"]),
+                lambda region, baseline: self.azure.region(self.targets[region], run["id"], True, baseline), fresh=True)
+            if reason:
+                raise InvalidAction(reason)
+            return plan
         if run.get("status") != "completed":
             raise InvalidAction("The original release must be completed")
         region = command.region
@@ -489,6 +534,8 @@ class DashboardReader:
                 return "A protected workflow is still active"
             return None
 
+        resume = {}
+
         def eligible(action):
             if action == "deploy":
                 return None
@@ -498,11 +545,21 @@ class DashboardReader:
             if not run:
                 return "Select an original completed release"
             try:
+                if action == "resume":
+                    def observe(name, verified):
+                        if name == region and not regions[name].get("unavailable"):
+                            return regions[name]
+                        return self.azure.region(self.targets[name], run["id"], True, verified)
+
+                    reason, plan = self._resume(run, current, jobs, observe)
+                    resume.update(plan or {})
+                    return reason
                 return self.recovery(action, run, baseline, {**regions[region], "region": region})
             except SOURCE_ERRORS:
                 return "Recovery evidence is unavailable"
 
-        reasons = {action: blocked(action) or eligible(action) for action in ("deploy", "cancel", "rollback", "retire")}
+        reasons = {action: blocked(action) or eligible(action)
+                   for action in ("deploy", "cancel", "rollback", "retire", "resume")}
         public = ("operation_id", "kind", "status", "created_at", "actor", "actor_name", "source_run_id", "run_id",
                   "environment", "region")
         ops = [*audit, *([current] if current else [])]
@@ -510,7 +567,9 @@ class DashboardReader:
                 "runs": [self._view_run(row) for row in recent[:20]], "regions": regions, "build": states.get("build", "unknown"),
                 "history": self._history(recent[:20], run, ops, reasons, blocked, now),
                 "timeline": self._timeline(run, jobs, ops) if run else [],
-                "pending": pending, "inbox": inbox, "inbox_truncated": inbox_truncated, "actions": reasons, "audit": [{k: row[k] for k in public if k in row} for row in audit],
+                "pending": pending, "inbox": inbox, "inbox_truncated": inbox_truncated, "actions": reasons,
+                "resume_start": resume.get("start_region") if reasons["resume"] is None else None,
+                "audit": [{k: row[k] for k in public if k in row} for row in audit],
                 "restored": restored is True, "retired": retired is True, "observed_at": stamp(),
                 "github_available": gh_available, "audit_available": audit_available, "_audit_read": audit_read}
 
@@ -535,7 +594,7 @@ class DashboardReader:
                     actions[action] = blocked(action) or "Select this release to verify its recovery evidence"
             result.append({**self._view_run(row), "started_at": _iso(start) if start is not None else None,
                            "profile": op.get("profile"), "commit": row.get("head_sha"),
-                           "requester": op.get("actor_name"),
+                           "requester": op.get("actor_name"), "resumed_from": op.get("source_run_id"),
                            "duration_seconds": int(max(0, end - start)) if start is not None and end is not None else None,
                            "actions": actions})
         return result

@@ -5,6 +5,7 @@ import unittest
 import zipfile
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from uuid import uuid4
 
 from dashboard.config import Target
 from dashboard.github import GitHub, ReadCache, RemoteError
@@ -12,7 +13,7 @@ from dashboard.memo import AzureMemo, SharedMemo
 from dashboard.evidence import Evidence, UnsafeArtifact, read_member
 from dashboard.observations import (DashboardReader, candidate, job_states, previous_revision, runtime_sample,
                                     safe_env)
-from dashboard.operations import InvalidAction
+from dashboard.operations import Command, InvalidAction
 
 
 def archive(entries):
@@ -564,6 +565,153 @@ class EventTimelineTests(unittest.TestCase):
         self.assertEqual(len(timeline), 50)
         self.assertEqual(timeline[0]["at"], iso(T0 - 1000 + 30))
         self.assertEqual(timeline[-1]["at"], iso(T0 - 999 + 78))
+
+
+class ResumeTests(unittest.TestCase):
+    """Resume from the first unfinished region: snapshot reasons and the uncached write-time check."""
+
+    REASONS = {
+        "conclusion": "Only a failed or cancelled release can be resumed",
+        "done": "Every region already succeeded",
+        "earlier": "An earlier region did not succeed in the latest attempt",
+        "build": "The source release did not build an image",
+        "traffic": "The start region's traffic is not on exactly one healthy revision at 100%",
+        "foreign": "Current traffic belongs to a different release",
+    }
+
+    @staticmethod
+    def failed_at(region, conclusion="failure"):
+        console = Console("completed")
+        console.runs[7]["conclusion"] = conclusion
+        order = ("kr", "sea", "usw")
+        names = {"kr": "korea", "sea": "southeastasia", "usw": "westus"}
+        console.jobs[7] = [{"name": "build / build", "status": "completed", "conclusion": "success"}, *[
+            {"name": f"{names[r]} / rollout", "status": "completed",
+             "conclusion": "success" if n < order.index(region) else conclusion if r == region else "skipped"}
+            for n, r in enumerate(order)]]
+        return console
+
+    @staticmethod
+    def check(console):
+        return console.reader.check(Command("resume", str(uuid4()), source_run_id=7))
+
+    def refused(self, console, reason, actor=OPERATOR_ACTOR):
+        self.assertEqual(console.snapshot(run_id=7, actor=actor)["actions"]["resume"], reason)
+        with self.assertRaisesRegex(InvalidAction, re.escape(reason)):
+            self.check(console)
+
+    def test_resume_starts_at_the_first_unfinished_region_with_the_source_profile(self):
+        for region in ("kr", "sea", "usw"):
+            console = self.failed_at(region)
+            console.ops[0]["profile"] = "demo"
+            self.assertEqual(self.check(console), {"start_region": region, "profile": "demo"})
+            snapshot = console.snapshot(run_id=7, actor=OPERATOR_ACTOR)
+            self.assertIsNone(snapshot["actions"]["resume"])
+            self.assertEqual(snapshot["resume_start"], region)
+        cancelled = self.failed_at("usw", "cancelled")
+        cancelled.ops = []
+        self.assertEqual(self.check(cancelled), {"start_region": "usw", "profile": "production"})
+
+    def test_start_region_on_the_source_candidate_or_verified_stable_is_eligible(self):
+        console = self.failed_at("usw")
+        console.weights = {"usw": 100}
+        self.assertEqual(self.check(console)["start_region"], "usw")
+        console.weights = {}
+        console.reader.evidence = SimpleNamespace(file=lambda *_, **__: {
+            "run_id": "7", "repository": "owner/repo", "region": "usw", "commit": SHA, "app_id": "/sample-usw",
+            "candidate": "app-usw--r7", "stable": "app-usw--r5", "traffic": {"app-usw--r5": 100}})
+        self.assertIsNone(console.snapshot(run_id=7, actor=OPERATOR_ACTOR)["actions"]["resume"])
+        self.assertEqual(self.check(console)["start_region"], "usw")
+
+    def test_resume_is_refused_unless_the_source_failed_or_was_cancelled(self):
+        console = self.failed_at("usw")
+        console.runs[7]["conclusion"] = "success"
+        self.refused(console, self.REASONS["conclusion"])
+
+    def test_resume_is_refused_while_the_source_is_running(self):
+        console = self.failed_at("usw")
+        console.runs[7].update(status="in_progress", conclusion=None)
+        self.assertEqual(console.snapshot(run_id=7, actor=OPERATOR_ACTOR)["actions"]["resume"],
+                         "A protected workflow is still active")
+        with self.assertRaisesRegex(InvalidAction, "Another protected workflow has not completed"):
+            self.check(console)
+
+    def test_resume_is_refused_when_every_region_succeeded(self):
+        console = self.failed_at("usw")
+        console.jobs[7][-1]["conclusion"] = "success"
+        self.refused(console, self.REASONS["done"])
+
+    def test_resume_is_refused_when_an_earlier_region_did_not_succeed(self):
+        console = self.failed_at("kr")
+        console.jobs[7][2]["conclusion"] = "success"
+        self.refused(console, self.REASONS["earlier"])
+
+    def test_resume_is_refused_without_a_built_image(self):
+        console = self.failed_at("kr")
+        console.jobs[7][0]["conclusion"] = "failure"
+        self.refused(console, self.REASONS["build"])
+
+    def test_a_release_that_was_itself_resumed_cannot_be_resumed(self):
+        reason = "This release was resumed from release 3; resume that source release instead"
+        console = self.failed_at("usw")
+        console.ops[0]["source_run_id"] = 3
+        self.refused(console, reason)
+        unrecorded = self.failed_at("usw")
+        unrecorded.ops = []
+        unrecorded.jobs[7][0]["conclusion"] = "skipped"
+        self.refused(unrecorded, "This release was itself a resume; resume its source release instead")
+
+    def test_resume_is_refused_unless_the_start_region_serves_one_healthy_revision_at_100(self):
+        console = self.failed_at("usw")
+        console.weights = {"usw": 50}
+        self.refused(console, self.REASONS["traffic"])
+        console.weights = {}
+        original = console._azure
+
+        def unhealthy(*args):
+            result = original(*args)
+            for row in result.get("revisions", []):
+                row["health"] = "Unhealthy"
+            return result
+
+        console.reader.azure = SimpleNamespace(region=unhealthy)
+        self.refused(console, self.REASONS["traffic"])
+
+    def test_resume_is_refused_when_start_region_traffic_is_neither_baseline_nor_candidate(self):
+        console = self.failed_at("usw")
+        console.reader.evidence = SimpleNamespace(file=lambda *_, **__: {
+            "run_id": "7", "repository": "owner/repo", "region": "usw", "commit": SHA, "app_id": "/sample-usw",
+            "candidate": "app-usw--r7", "stable": "app-usw--r4", "traffic": {"app-usw--r4": 100}})
+        self.refused(console, self.REASONS["foreign"])
+
+    def test_resume_requires_operator_role_no_unresolved_write_and_no_active_run(self):
+        console = self.failed_at("usw")
+        self.assertEqual(console.snapshot(run_id=7)["actions"]["resume"], "ReleaseOperator role required")
+        console.reader.store.unresolved = lambda: True
+        self.assertEqual(console.snapshot(run_id=7, actor=OPERATOR_ACTOR)["actions"]["resume"],
+                         "A write is unresolved or GitHub state is unavailable")
+        console.reader.store.unresolved = lambda: False
+        console.runs[8] = release_run(8, "in_progress")
+        console.cache.invalidate(8)
+        self.assertEqual(console.snapshot(run_id=7, actor=OPERATOR_ACTOR)["actions"]["resume"],
+                         "A protected workflow is still active")
+        with self.assertRaisesRegex(InvalidAction, "Another protected workflow has not completed"):
+            self.check(console)
+
+    def test_resume_run_is_a_release_linked_to_its_source_and_its_gates_reach_the_inbox(self):
+        console = self.failed_at("usw")
+        console.runs[9] = release_run(9, "waiting")
+        console.jobs[9] = [{"name": "build / build", "status": "completed", "conclusion": "skipped"},
+                           {"name": "westus / rollout", "status": "waiting"}]
+        console.rules[9] = [{"environment": "prod-usw", "sha": SHA}]
+        console.ops.append({"operation_id": "o9", "kind": "deploy", "status": "accepted", "run_id": 9,
+                            "source_run_id": 7, "start_region": "usw", "profile": "production",
+                            "actor": "requester", "created_at": iso(T0)})
+        snapshot = console.snapshot(run_id=7)
+        self.assertEqual(snapshot["inbox"], [{"operation_id": "o9", "run_id": 9, "kind": "deploy", "region": "usw",
+                                              "environment": "prod-usw", "reason": None, "source_run_id": 7}])
+        self.assertEqual({entry["id"]: entry["resumed_from"] for entry in snapshot["history"]}, {7: None, 9: 7})
+        self.assertEqual(console.snapshot(run_id=9)["pending"], snapshot["inbox"])
 
 
 class ActiveWorkflowTests(unittest.TestCase):

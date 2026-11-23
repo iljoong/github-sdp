@@ -46,7 +46,7 @@ const reasonText = {
   "Every region already succeeded": "모든 지역이 이미 성공했습니다.",
   "An earlier region did not succeed in the latest attempt": "최근 시도에서 앞선 지역이 성공하지 않았습니다.",
   "The source release did not build an image": "원본 릴리스가 이미지를 빌드하지 않았습니다.",
-  "This release was itself a resume; resume its source release instead": "이 릴리스는 재개 실행입니다. 원본 릴리스에서 재개하세요.",
+  "The source release did not deploy any region": "원본 릴리스가 어떤 지역도 배포하지 않았습니다.",
   "The start region's traffic is not on exactly one healthy revision at 100%": "시작 지역 트래픽이 정상 리비전 하나에 100% 있지 않습니다.",
   "Recovery evidence is unavailable": "복구 근거를 확인할 수 없습니다.",
   [RERUN]: "GitHub 재실행(Re-run)은 배포할 수 없어 승인할 수 없습니다. 거부하면 GitHub 실행이 즉시 종료됩니다."
@@ -54,7 +54,7 @@ const reasonText = {
 const allowedBecause = {
   rollback: "검증된 기준 스냅샷 · 이전 리비전 활성/정상 · 현재 트래픽이 이 릴리스에 속함",
   retire: "검증된 demo 증거 · 후보 트래픽 100% · 후보와 이전 리비전 정상",
-  resume: "원본 실패/취소 · 앞선 지역 모두 성공 · 시작 지역 트래픽이 정상 리비전 하나에 100%"
+  resume: "원본 실패/취소 · 앞선 지역 모두 성공(재개 실행이 건너뛴 앞 지역 포함) · 시작 지역 트래픽이 정상 리비전 하나에 100%"
 };
 const eventText = {job_started: "시작", approval_requested: "승인 요청"};
 const regionKeys = {Digit1: "kr", Digit2: "sea", Digit3: "usw", Numpad1: "kr", Numpad2: "sea", Numpad3: "usw"};
@@ -430,8 +430,11 @@ function gateKey(gate) {
   return `${gate.operation_id}:${gate.environment}` + (gate.run_attempt > 1 ? `:${gate.run_attempt}` : "");
 }
 
-// Gates the signed-in user can act on: approvable ones, and re-run gates that only need a rejection.
-function actionable(gate) { return !gate.reason || (gate.rerun && gate.reason === RERUN); }
+// Gates the signed-in user can act on: approvable ones, and re-run gates whose rejection nothing blocks.
+function actionable(gate) { return gate.rerun ? !rejectReason(gate) : !gate.reason; }
+
+// A re-run gate is reject-only; its rejection is blocked only by the server's reject_reason.
+function rejectReason(gate) { return gate.rerun ? gate.reject_reason ?? null : gate.reason; }
 
 function rerunBadge(attempt) {
   const badge = node("span", `재실행 · 시도 ${attempt}`); badge.className = "rerun";
@@ -459,9 +462,8 @@ function inboxEntry(gate) {
     item.append(why);
   }
   const actions = node("div"); actions.className = "actions";
-  const rejectOnly = gate.rerun && gate.reason === RERUN;
-  actions.append(commandButton("approve", gate.reason, gate.run_id, gate, false),
-    commandButton("reject", rejectOnly ? null : gate.reason, gate.run_id, gate, false));
+  actions.append(commandButton("approve", gate.reason ?? (gate.rerun ? RERUN : null), gate.run_id, gate, false),
+    commandButton("reject", rejectReason(gate), gate.run_id, gate, false));
   item.append(actions);
   return item;
 }

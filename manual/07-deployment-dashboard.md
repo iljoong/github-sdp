@@ -71,11 +71,10 @@ az bicep build --file infra\dashboard.bicep --stdout
 - **활성 조건**(아니면 버튼이 사유와 함께 비활성화):
   - ReleaseOperator 역할, 미해결 쓰기 없음, 진행 중인 보호 workflow 없음
   - 원본 릴리스가 완료되었고 결과가 실패(`failure`) 또는 취소(`cancelled`). 재실행된 릴리스(시도 2 이상)도 가능
-  - 원본의 build가 성공했고, 시작 지역 앞의 모든 지역이 최근 시도에서 성공했으며, 이후 지역은 실행되지 않음
+  - 원본의 build가 성공했고(원본이 재개 실행이면 promote 성공), 시작 지역 앞의 모든 지역이 최근 시도에서 성공했으며(재개 실행 원본은 처음 실행한 지역 앞에서 건너뛴 지역도 충족), 이후 지역은 실행되지 않음
   - 시작 지역의 현재 트래픽이 active·Healthy인 revision **하나에 100%**. 원본 baseline이 있으면 그 stable 또는 candidate여야 하며, baseline이 없는 지역(원본에서 snapshot 전)은 정상 revision 하나에 100%이면 그 revision이 새 baseline이 됩니다
-  - 원본 자체가 재개 실행이 아님 — 재개 실행을 다시 재개할 수 없으며, 처음 원본 릴리스에서 재개합니다
-- **결과 확인:** 접수되면 새 run이 릴리스 목록에 원본과 별개의 릴리스로 나타나고 `#<원본>에서 재개` 링크로 연결됩니다. 새 실행의 `release.json`에는 새 `commit`과 `source_run_id`가 기록됩니다. workflow·스크립트 코드는 **현재 `main`** 의 것이고 이미지는 원본의 것입니다.
-- **CLI:** 관제실을 쓸 수 없고 별도 승인 경로가 유효할 때만 `gh workflow run release.yml --ref main -f profile=<원본 profile> -f resume_from_run_id=<원본 run ID> -f start_region=<kr|sea|usw>`로 같은 실행을 시작할 수 있습니다. workflow는 원본이 이 저장소 `main`의 완료된 `release.yml` 수동 실행인지, 시작 지역 앞 지역이 최근 시도에서 성공했는지, 이미지가 설정된 ACR의 digest인지 검증하고 아니면 Azure 변경 없이 실패합니다. `release-kr.yml`은 재개할 수 없습니다.
+- **결과 확인:** 접수되면 새 run이 릴리스 목록에 원본과 별개의 릴리스로 나타나고 `#<원본>에서 재개` 링크로 연결됩니다. 새 실행의 `release.json`에는 새 `commit`, `source_run_id`(직전 원본), `build_run_id`·`source_commit`(이미지를 빌드한 run과 commit)이 기록되며 baseline과 지역 성공 증거에도 복사됩니다. 재개 실행도 다시 재개할 수 있습니다. workflow·스크립트 코드는 **현재 `main`** 의 것이고 이미지는 원본의 것입니다.
+- **CLI:** 관제실을 쓸 수 없고 별도 승인 경로가 유효할 때만 `gh workflow run release.yml --ref main -f profile=<원본 profile> -f resume_from_run_id=<원본 run ID> -f start_region=<kr|sea|usw>`로 같은 실행을 시작할 수 있습니다. workflow는 원본이 이 저장소 `main`의 완료된 `release.yml` 수동 실행인지, 시작 지역 앞 지역이 최근 시도에서 성공했는지(재개 실행 원본은 건너뛴 앞 지역 포함), 이미지가 설정된 ACR의 digest인지 검증하고 아니면 Azure 변경 없이 실패합니다. `release-kr.yml`은 재개할 수 없습니다.
 
 ## 운영 중 문제 해결
 
@@ -83,7 +82,7 @@ az bicep build --file infra\dashboard.bicep --stdout
 | --- | --- |
 | 환경은 대기 중인데 승인할 수 없음 | 콘솔에서 요청한 동일 run, App 설치, webhook delivery/서명, 해당 환경의 규칙과 GitHub job 상태, Entra 승인자의 역할 및 요청자 분리 |
 | 승인 대기에 "Re-run blocked — reject only" | 누군가 GitHub에서 릴리스를 재실행했습니다. 승인할 수 없으므로 `거부`해 해당 시도를 종료하고, 남은 지역은 원본 릴리스에서 `실패 지역부터 재개`로 배포하거나 `롤백 요청`으로 되돌립니다. |
-| 실패한 릴리스에서 `실패 지역부터 재개`가 비활성 | 표시된 사유를 확인합니다. 시작 지역 트래픽이 정상 revision 하나에 100%가 아니면 먼저 롤백 또는 조사로 상태를 정리합니다. 재개 실행의 재개는 지원하지 않으므로 처음 원본 릴리스를 선택합니다. |
+| 실패한 릴리스에서 `실패 지역부터 재개`가 비활성 | 표시된 사유를 확인합니다. 시작 지역 트래픽이 정상 revision 하나에 100%가 아니면 먼저 롤백 또는 조사로 상태를 정리합니다. 재개 실행도 그대로 선택해 다시 재개할 수 있습니다. |
 | **변경 알림** 칩이 오래됨 | GitHub App의 Workflow runs·Workflow jobs 이벤트 구독과 최근 delivery를 확인합니다. 화면은 폴링으로 계속 갱신됩니다. |
 | 작업 결과가 `확인 필요` 또는 `reserved`에 머묾 | 진행 중인 쓰기가 끝나기를 기다립니다. `reserved`는 GitHub 요청이 전달됐지만 저장에 실패한 경우에도 남을 수 있습니다. 운영 지원 담당자가 작업 종류에 맞춰 GitHub run/결정 이력의 워크플로·브랜치·입력·원본 실행·요청 시각을 대조하고 Azure 트래픽을 확인합니다. 해당 App의 승인/거부 결과를 job 진행 여부만으로 추정하지 않습니다. 정확한 결과를 입증하지 못하면 쓰기 잠금을 유지하고 재시도하지 않습니다. 입증되면 `dashboardops`에서 `op:<operation_id>` 정정(접수된 dispatch는 확인한 `run_id` 포함), 접수된 dispatch의 `run:<run_id>` 색인 행 생성(`operation_id=<operation_id>`), 접수 확인된 승인·거부·취소의 `claim:<op의 claim 값>` 생성(`owner=<operation_id>`), 같은 소유자의 `lock:write` 해제를 한 파티션 트랜잭션으로 처리합니다. 작업 행과 잠금은 조회 당시 ETag를 사용합니다. `recent:<역순 시각>:<operation_id>`와 `run:<run_id>`는 `operation_id`만 담는 조회 색인이며 상태는 항상 `op:` 행을 따릅니다. `meta:index-v1`은 기존 행 색인이 끝났다는 표시이므로 삭제하지 않습니다. |
 | 실행은 완료됐지만 복구/종료 검증이 표시되지 않음 | 해당 시도의 artifact 유무·만료, 원본 run과 stable revision, 현재 실제 트래픽/active 값을 대조합니다. UI의 `GitHub 요청 접수`는 작업의 성공이 아닙니다. |

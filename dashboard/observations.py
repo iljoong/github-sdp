@@ -66,8 +66,9 @@ def job_states(jobs, kind, region=None):
     elif kind == "rollback":
         names = {r: {f"{p} / restore"} for r, p in JOB_PREFIX.items()}
     else:
-        names = {"build": {"build / build", "build"}}
-        names.update({r: {f"{p} / rollout"} for r, p in JOB_PREFIX.items()})
+        names = {"build": {"build / build", "build"}, "promote": {"promote"}}
+        # A skipped reusable-workflow call is listed under its caller job name alone.
+        names.update({r: {f"{p} / rollout", p} for r, p in JOB_PREFIX.items()})
     result = {}
     for key, matching in names.items():
         rows = [job for job in jobs if job.get("name", "").strip().lower() in matching]
@@ -76,6 +77,11 @@ def job_states(jobs, kind, region=None):
             result[key] = ((rows[0].get("conclusion") or "unknown") if rows[0].get("status") == "completed"
                            else (rows[0].get("status") or "unknown"))
     return result
+
+
+def _attempt(value):
+    """A GitHub run_attempt as a positive int, or None when absent or malformed."""
+    return value if type(value) is int and value >= 1 else None
 
 
 def _single_job(jobs, region):
@@ -258,8 +264,8 @@ class DashboardReader:
         if env != expected or (operation["kind"] != "deploy" and operation.get("region") != region):
             return None
         run = self.github.run(run_id)
-        attempt = run.get("run_attempt")
-        if (not self._run_matches(run, run_id, workflow) or type(attempt) is not int or attempt < 1
+        attempt = _attempt(run.get("run_attempt"))
+        if (not self._run_matches(run, run_id, workflow) or attempt is None
                 or (attempt != 1 and operation["kind"] != "deploy") or run.get("status") == "completed"):
             return None
         return {"attempt": attempt, "rerun": attempt > 1} if self._waiting_gate(operation, env, run) else None
@@ -328,8 +334,8 @@ class DashboardReader:
 
     def _rerun_rollout(self, run, region):
         """Whether any attempt after the first started the region's rollout job (unknown states count as started)."""
-        attempts = run.get("run_attempt")
-        if type(attempts) is not int or attempts < 1:
+        attempts = _attempt(run.get("run_attempt"))
+        if attempts is None:
             return True
         for attempt in range(2, attempts + 1):
             for job in self.github.jobs(run["id"], attempt):
@@ -355,14 +361,17 @@ class DashboardReader:
         if run.get("conclusion") not in ("failure", "cancelled"):
             return "Only a failed or cancelled release can be resumed", None
         states = job_states(jobs, "deploy")
-        # A resume run skips build and its earlier regions, so promote_source.py would refuse it as a source.
-        if origin and origin.get("kind") == "deploy" and origin.get("source_run_id"):
-            return f"This release was resumed from release {positive(origin['source_run_id'])}; resume that source release instead", None
-        if states["build"] == "skipped":
-            return "This release was itself a resume; resume its source release instead", None
-        if states["build"] != "success":
+        # A resume source skipped build and the regions before its start region; those count as done by the
+        # release it resumed (promote_source.py applies the same rule), so only regions from the first it ran count.
+        if states["build"] == "success":
+            first = 0
+        elif states["build"] == "skipped" and states["promote"] == "success":
+            first = next((index for index, region in enumerate(REGIONS) if states[region] != "skipped"), None)
+            if first is None:
+                return "The source release did not deploy any region", None
+        else:
             return "The source release did not build an image", None
-        start = next((region for region in REGIONS if states[region] != "success"), None)
+        start = next((region for region in REGIONS[first:] if states[region] != "success"), None)
         if start is None:
             return "Every region already succeeded", None
         later = REGIONS[REGIONS.index(start) + 1:]
@@ -643,7 +652,7 @@ class DashboardReader:
         for job in jobs:
             name = str(job.get("name", ""))
             region = regions.get(name.split(" / ", 1)[0].strip().lower())
-            attempt = job.get("run_attempt") if type(job.get("run_attempt")) is int else None
+            attempt = _attempt(job.get("run_attempt"))
             add(job.get("started_at"), "job_started", name, region=region, attempt=attempt)
             if job.get("status") == "completed":
                 add(job.get("completed_at"), "job_completed", name, job.get("conclusion"), region=region,
@@ -652,7 +661,7 @@ class DashboardReader:
             rules = self.inbox.rules(run["id"])
         except SOURCE_ERRORS:
             rules = []
-        current = run.get("run_attempt") if type(run.get("run_attempt")) is int else 1
+        current = _attempt(run.get("run_attempt")) or 1
         started = _epoch(run.get("run_started_at")) if current > 1 else None
         for rule in rules:
             env = rule.get("environment")
@@ -707,12 +716,13 @@ class DashboardReader:
             gate = self.gate(op, env)
             if not gate or self.store.claimed(review_claim(op["run_id"], env, gate["attempt"])):
                 continue
-            reason = ("An unrelated write is unresolved" if unresolved else
-                      "ReleaseApprover role required" if APPROVER not in actor.roles else
-                      "A different Entra approver is required" if actor.object_id == op["actor"] else
-                      RERUN_REASON if gate["rerun"] else None)
+            blocked = ("An unrelated write is unresolved" if unresolved else
+                       "ReleaseApprover role required" if APPROVER not in actor.roles else
+                       "A different Entra approver is required" if actor.object_id == op["actor"] else None)
+            # A re-run gate can never be approved; it may still be rejected when nothing else blocks the decision.
             result.append({"operation_id": op["operation_id"], "run_id": op["run_id"], "kind": op["kind"],
-                           "region": region, "environment": env, "reason": reason,
+                           "region": region, "environment": env,
+                           "reason": blocked or (RERUN_REASON if gate["rerun"] else None),
                            "source_run_id": op.get("source_run_id"), "run_attempt": gate["attempt"],
-                           "rerun": gate["rerun"]})
+                           "rerun": gate["rerun"], "reject_reason": blocked})
         return result

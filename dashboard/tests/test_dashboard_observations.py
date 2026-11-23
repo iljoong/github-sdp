@@ -14,7 +14,9 @@ from dashboard.evidence import Evidence, UnsafeArtifact, read_member
 from dashboard.observations import (DashboardReader, candidate, job_states, previous_revision, runtime_sample,
                                     safe_env)
 from dashboard.operations import Command, InvalidAction
+from pathlib import Path
 
+TRANSLATIONS = (Path(__file__).resolve().parents[1] / "static" / "dashboard.js").read_text(encoding="utf-8")
 
 def archive(entries):
     buffer = io.BytesIO()
@@ -441,7 +443,7 @@ class ApprovalInboxTests(unittest.TestCase):
         self.assertEqual(snapshot["pending"], [])
         self.assertEqual(snapshot["inbox"], [{"operation_id": "o9", "run_id": 9, "kind": "deploy", "region": "sea",
                                               "environment": "prod-sea", "reason": None, "source_run_id": None,
-                                              "run_attempt": 1, "rerun": False}])
+                                              "run_attempt": 1, "rerun": False, "reject_reason": None}])
         requester = SimpleNamespace(roles={"ReleaseApprover"}, object_id="requester")
         self.assertEqual(console.snapshot(run_id=7, region="usw", actor=requester)["inbox"][0]["reason"],
                          "A different Entra approver is required")
@@ -491,7 +493,16 @@ class RerunGateTests(unittest.TestCase):
         self.rerun(console)
         self.assertEqual(console.snapshot(run_id=7)["inbox"], [
             {"operation_id": "o9", "run_id": 9, "kind": "deploy", "region": "usw", "environment": "prod-usw",
-             "reason": "Re-run blocked — reject only", "source_run_id": None, "run_attempt": 2, "rerun": True}])
+             "reason": "Re-run blocked — reject only", "source_run_id": None, "run_attempt": 2, "rerun": True,
+             "reject_reason": None}])
+
+    def test_rerun_gate_can_be_rejected_only_when_nothing_else_blocks_the_decision(self):
+        console = Console("completed")
+        self.rerun(console)
+        requester = SimpleNamespace(roles={"ReleaseApprover"}, object_id="requester")
+        gate = console.snapshot(run_id=7, actor=requester)["inbox"][0]
+        self.assertEqual((gate["rerun"], gate["reason"], gate["reject_reason"]),
+                         (True, "A different Entra approver is required", "A different Entra approver is required"))
 
     def test_rule_request_received_before_the_current_attempt_started_is_ignored(self):
         console = Console("completed")
@@ -695,6 +706,8 @@ class ResumeTests(unittest.TestCase):
         self.assertEqual(console.snapshot(run_id=7, actor=actor)["actions"]["resume"], reason)
         with self.assertRaisesRegex(InvalidAction, re.escape(reason)):
             self.check(console)
+        # Every refusal is a static string the console translates.
+        self.assertIn(f'\n  "{reason}": ', TRANSLATIONS)
 
     def test_resume_starts_at_the_first_unfinished_region_with_the_source_profile(self):
         for region in ("kr", "sea", "usw"):
@@ -747,15 +760,40 @@ class ResumeTests(unittest.TestCase):
         console.jobs[7][0]["conclusion"] = "failure"
         self.refused(console, self.REASONS["build"])
 
-    def test_a_release_that_was_itself_resumed_cannot_be_resumed(self):
-        reason = "This release was resumed from release 3; resume that source release instead"
-        console = self.failed_at("usw")
-        console.ops[0]["source_run_id"] = 3
-        self.refused(console, reason)
-        unrecorded = self.failed_at("usw")
-        unrecorded.ops = []
-        unrecorded.jobs[7][0]["conclusion"] = "skipped"
-        self.refused(unrecorded, "This release was itself a resume; resume its source release instead")
+    @staticmethod
+    def resumed_from(start, failed):
+        """Source 7 as a resume run that started at `start` and failed at `failed`."""
+        console = ResumeTests.failed_at(failed)
+        order = ("kr", "sea", "usw")
+        names = {"kr": "korea", "sea": "southeastasia", "usw": "westus"}
+        console.jobs[7] = [{"name": "build", "status": "completed", "conclusion": "skipped"},
+                           {"name": "promote", "status": "completed", "conclusion": "success"}, *[
+            {"name": names[r], "status": "completed", "conclusion": "skipped"} if n < order.index(start) else
+            {"name": f"{names[r]} / rollout", "status": "completed",
+             "conclusion": "success" if n < order.index(failed) else "failure" if r == failed else "skipped"}
+            for n, r in enumerate(order)]]
+        console.ops[0].update(source_run_id=3, start_region=start, profile="demo")
+        return console
+
+    def test_a_resume_run_can_be_resumed_past_the_regions_it_skipped(self):
+        for start, failed in (("sea", "sea"), ("sea", "usw"), ("usw", "usw"), ("kr", "sea")):
+            with self.subTest(start=start, failed=failed):
+                console = self.resumed_from(start, failed)
+                self.assertEqual(self.check(console), {"start_region": failed, "profile": "demo"})
+                snapshot = console.snapshot(run_id=7, actor=OPERATOR_ACTOR)
+                self.assertIsNone(snapshot["actions"]["resume"])
+                self.assertEqual(snapshot["resume_start"], failed)
+
+    def test_skipped_regions_are_satisfied_only_before_the_first_region_a_successful_resume_ran(self):
+        built = self.failed_at("usw")
+        built.jobs[7][1] = {"name": "korea", "status": "completed", "conclusion": "skipped"}
+        self.refused(built, self.REASONS["earlier"])
+        promote_failed = self.resumed_from("sea", "sea")
+        promote_failed.jobs[7][1]["conclusion"] = "failure"
+        self.refused(promote_failed, self.REASONS["build"])
+        nothing_ran = self.resumed_from("sea", "sea")
+        nothing_ran.jobs[7][3] = {"name": "southeastasia", "status": "completed", "conclusion": "skipped"}
+        self.refused(nothing_ran, "The source release did not deploy any region")
 
     def test_resume_is_refused_unless_the_start_region_serves_one_healthy_revision_at_100(self):
         console = self.failed_at("usw")
@@ -806,7 +844,7 @@ class ResumeTests(unittest.TestCase):
         snapshot = console.snapshot(run_id=7)
         self.assertEqual(snapshot["inbox"], [{"operation_id": "o9", "run_id": 9, "kind": "deploy", "region": "usw",
                                               "environment": "prod-usw", "reason": None, "source_run_id": 7,
-                                              "run_attempt": 1, "rerun": False}])
+                                              "run_attempt": 1, "rerun": False, "reject_reason": None}])
         self.assertEqual({entry["id"]: entry["resumed_from"] for entry in snapshot["history"]}, {7: None, 9: 7})
         self.assertEqual(console.snapshot(run_id=9)["pending"], snapshot["inbox"])
 

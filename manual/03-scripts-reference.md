@@ -541,11 +541,14 @@ python scripts/promote_source.py rebind <원본 release.json>  # 작업 디렉�
 | --- | --- | --- |
 | verify | 원본 run ID 숫자, 이 run과 다름 | `Source run ID must be numeric`, `Source must be another run` |
 | verify | 같은 저장소, `.github/workflows/release.yml`, `workflow_dispatch`, `main`, `completed` | `Wrong source repository`, `Source must be a release.yml run` 등 |
-| verify | `start_region` 앞 지역의 `<caller> / rollout` job이 원본 최근 시도(`filter=latest`)에서 `success` | `Source region <r> did not succeed in its latest attempt` |
+| verify | `start_region` 앞 지역의 `<caller> / rollout` job이 원본 최근 시도(`filter=latest`)에서 `success`. 원본이 재개 run(`promote` 성공, `build` skipped)이면 원본이 처음 실행한 지역 앞의 `skipped` 지역도 충족 | `Source region <r> did not succeed in its latest attempt` |
+| rebind | 원본이 재개 run의 기록(`source_run_id` 있음)이면 `build_run_id`(숫자)와 `source_commit` 보유 | `Source release record lacks build provenance` |
 | rebind | 원본 `release.json` 의 repository/run_id/commit이 검증된 원본과 일치 | `Source release record ...` |
 | rebind | 이미지가 `<ACR_NAME>.azurecr.io/safe-demo@sha256:...` digest | `Source image must be an immutable digest`, `Source image is not from the configured registry` |
 
-출력 `release.json`: `image`(원본과 동일), `run_id`/`commit`(이 run), `repository`, `source_run_id`.
+출력 `release.json`: `image`(원본과 동일), `run_id`/`commit`(이 run), `repository`, `source_run_id`(직전 원본 run),
+`build_run_id`/`source_commit`(이미지를 빌드한 run과 그 commit; 재개의 재개에서도 유지).
+`snapshot.py` 는 이 세 필드를 baseline에, `rollout.py` 는 `success.json` 에 그대로 복사합니다.
 workflow 코드는 현재 `main`, 이미지는 원본 run의 것입니다.
 
 ---

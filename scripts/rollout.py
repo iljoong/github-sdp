@@ -12,7 +12,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import demo_load
-from common import (az, candidate_owned, cli_app, equal_traffic, expected_candidate, guarded_state, iso, load,
+from common import (PROVENANCE, az, candidate_owned, cli_app, equal_traffic, expected_candidate, guarded_state, iso, load,
                     props, ready, require, revision, save, set_traffic, utcnow, verify_context)
 from metrics import (PROFILES, TELEMETRY_RETRY_SECONDS, TELEMETRY_RETRY_TIMEOUT,
                      IncompleteTelemetry, gate, metric, query)
@@ -258,7 +258,8 @@ def deploy(snapshot, profile):
             reference = bake(snapshot, profile, weight, expected_weights, reference)
         save(Path("evidence") / os.environ["REGION"] / "success.json",
              {"at": iso(utcnow()), "revision": snapshot["candidate"], "image": snapshot["image"],
-              "profile": profile, "old_revision_active": True})
+              "profile": profile, "old_revision_active": True,
+              **{key: snapshot[key] for key in PROVENANCE if key in snapshot}})
     except BaseException as failure:
         # SIGINT/SIGTERM allow best effort only. SIGKILL, host loss and Azure outages
         # require the separate protected manual-restore workflow.

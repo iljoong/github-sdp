@@ -70,10 +70,11 @@ def event(seconds_ago, kind, **fields):
             "actor": None, "actor_name": None, **fields}
 
 
-def gate(operation_id, run_id, region_key, reason=None, kind="deploy", attempt=1):
+def gate(operation_id, run_id, region_key, reason=None, kind="deploy", attempt=1, reject_reason=None):
     return {"operation_id": operation_id, "run_id": run_id, "kind": kind, "region": region_key,
             "environment": f"prod-{region_key}", "reason": reason, "source_run_id": None if kind == "deploy" else 480,
-            "run_attempt": attempt, "rerun": attempt > 1}
+            "run_attempt": attempt, "rerun": attempt > 1,
+            "reject_reason": reject_reason if attempt > 1 else reason}
 
 
 def source(age, state="fresh", **extra):
@@ -419,6 +420,15 @@ def run(fixture, headed, screenshot=None):
             page.locator("#refresh").click()
             gated = items.filter(has_text="prod-usw")
             expect(gated).to_have_count(1)
+            blocked = "A different Entra approver is required"
+            fx.call("PUT", "/__fixture/snapshot", {**rerun, "inbox": [
+                gate("op-rerun", 501, "usw", blocked, attempt=2, reject_reason=blocked)]})
+            page.locator("#refresh").click()
+            expect(gated).to_contain_text("요청자 본인은 승인할 수 없습니다")
+            expect(gated.get_by_role("button", name="승인", exact=True)).to_be_disabled()
+            expect(gated.get_by_role("button", name="거부", exact=True)).to_be_disabled()
+            fx.call("PUT", "/__fixture/snapshot", rerun)
+            page.locator("#refresh").click()
             expect(gated).to_have_attribute("data-rerun", "1")
             expect(gated).to_contain_text("재실행 · 시도 2")
             expect(gated).to_contain_text("승인할 수 없습니다")
@@ -438,7 +448,8 @@ def run(fixture, headed, screenshot=None):
             assert fx.call("GET", "/__fixture/reviews")[-1] == {"operation_id": "op-rerun", "environment": "prod-usw",
                                                                "approved": False}
             fx.call("PUT", "/__fixture/snapshot", update)
-            check("re-run gate is reject-only: approve disabled with reason, reject sent; re-run badges and timeline attempts")
+            check("re-run gate is reject-only by its rerun flag: approve disabled with reason, reject blocked only by "
+                  "reject_reason, reject sent; re-run badges and timeline attempts")
 
             tab("overview")
             page.locator("[data-region=kr]").click()

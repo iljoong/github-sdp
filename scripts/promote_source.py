@@ -2,7 +2,9 @@
 
 Resume mode of release.yml reuses the source run's immutable image instead of
 rebuilding; the record is rebound to this run so region.yml, snapshot.py and
-rollout.py (including their attempt-1 rerun guards) run unchanged.
+rollout.py (including their attempt-1 rerun guards) run unchanged. The source may
+itself be a resume run; the rebound record then keeps the original build run and
+commit as build_run_id and source_commit.
 """
 import json
 import os
@@ -39,12 +41,23 @@ def verify_source(read, repository, source_run_id, start_region, current_run_id)
     listing = read(f"/repos/{repository}/actions/runs/{source_run_id}/jobs?filter=latest&per_page=100")
     jobs = listing["jobs"]
     require(listing["total_count"] == len(jobs), "Incomplete source jobs listing")
-    for region, caller in earlier:
-        matches = [job for job in jobs if job["name"] == f"{caller} / rollout"]
-        require(len(matches) == 1 and matches[0]["status"] == "completed"
-                and matches[0]["conclusion"] == "success",
+    states = [conclusion(jobs, caller, f"{caller} / rollout") for _, caller in REGIONS]
+    # A resume run skips the regions before its start region; they count as done by the run it resumed.
+    resumed = (conclusion(jobs, "promote") == "success"
+               and conclusion(jobs, "build", "build / build") == "skipped")
+    first = next((index for index, state in enumerate(states) if state != "skipped"), len(states))
+    for index, (region, _) in enumerate(earlier):
+        require(states[index] == "success" or (resumed and index < first < len(states)),
                 f"Source region {region} did not succeed in its latest attempt")
     return run["head_sha"]
+
+
+def conclusion(jobs, *names):
+    """The single completed job's conclusion, or None when it is missing, duplicated or not completed."""
+    matches = [job for job in jobs if job["name"] in names]
+    if len(matches) != 1 or matches[0]["status"] != "completed":
+        return None
+    return matches[0]["conclusion"]
 
 
 def start_index(start_region):
@@ -63,8 +76,16 @@ def rebind(release, *, repository, source_run_id, source_sha, run_id, commit, re
             and image.startswith(f"{registry}.azurecr.io/safe-demo@sha256:"),
             "Source image is not from the configured registry")
     require(re.fullmatch(r"[0-9]+", run_id) and run_id != source_run_id, "Invalid resume run")
-    return {"image": image, "run_id": run_id, "repository": repository,
-            "commit": commit, "source_run_id": source_run_id}
+    # A record that was itself rebound carries the original build; a built record is the build.
+    if "source_run_id" in release:
+        build_run_id, source_commit = release.get("build_run_id"), release.get("source_commit")
+        require(isinstance(build_run_id, str) and re.fullmatch(r"[0-9]+", build_run_id)
+                and isinstance(source_commit, str) and source_commit,
+                "Source release record lacks build provenance")
+    else:
+        build_run_id, source_commit = source_run_id, source_sha
+    return {"image": image, "run_id": run_id, "repository": repository, "commit": commit,
+            "source_run_id": source_run_id, "build_run_id": build_run_id, "source_commit": source_commit}
 
 
 def main(argv, env=os.environ, read=None):

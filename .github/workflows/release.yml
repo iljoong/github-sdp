@@ -13,7 +13,7 @@ on:
         required: false
         default: ''
       start_region:
-        description: Resume only - first region to deploy; every earlier region must have succeeded in the source run
+        description: Resume only - first region to deploy; every earlier region must have succeeded in the source run (or, for a resume source, been skipped before its start region)
         type: choice
         options: [kr, sea, usw]
         default: kr
@@ -54,7 +54,7 @@ jobs:
         env:
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: test "$RUN_ATTEMPT" = "1" || { echo "Deploy reruns forbidden; restore or start a new release"; exit 1; }
-      - name: Verify source is a completed main release whose earlier regions succeeded
+      - name: Verify source is a completed main release whose earlier regions succeeded or were skipped by its own resume
         id: source
         env:
           GH_TOKEN: ${{ github.token }}

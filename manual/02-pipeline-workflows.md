@@ -63,11 +63,12 @@ demo-retire.yml (workflow_dispatch, source_run_id, region) – 데모 전용
 1. `build` 를 건너뛰고 **promote job**(environment `build`, 10분 제한, `actions: read`)이 실행됩니다.
    1. `run_attempt == 1` 확인 (재실행 거부)
    2. `python scripts/promote_source.py verify` – 원본이 이 저장소의 `release.yml`, `workflow_dispatch`, `main`, `completed`
-      run인지, `start_region` 앞의 모든 지역 rollout job(`korea / rollout` 등)이 원본의 **최근 시도**에서 `success` 인지 확인하고 원본 `sha` 출력
+      run인지, `start_region` 앞의 모든 지역 rollout job(`korea / rollout` 등)이 원본의 **최근 시도**에서 `success` 인지 확인하고 원본 `sha` 출력.
+      원본이 재개 run(`promote` 성공, `build` skipped)이면 원본이 처음 실행한 지역 앞의 `skipped` 지역도 충족으로 봅니다(재개의 재개)
    3. 원본 run의 `release-<resume_from_run_id>` artifact 다운로드
    4. `python scripts/promote_source.py rebind` – 원본 `release.json` 의 repository/run/commit이 검증된 원본과 같고,
       이미지가 `<ACR_NAME>.azurecr.io/safe-demo@sha256:...` digest인지 확인한 뒤 **이미지는 그대로**, `run_id`/`commit` 은
-      이 run 값으로, `source_run_id` 를 추가한 `release.json` 생성
+      이 run 값으로, `source_run_id`·`build_run_id`·`source_commit`(원본 build run과 commit, 재개의 재개에서도 유지)을 추가한 `release.json` 생성
    5. `release-<run_id>` artifact 업로드 (90일)
 2. 지역 job은 `start_region` 부터 실행되고, 그 뒤 지역은 이 run의 앞 지역이 성공해야 실행됩니다. 시작 지역 앞의 지역은 건너뜁니다.
 3. 새 run은 시도 1, 새 run ID·candidate·baseline을 쓰므로 `region.yml`·`snapshot.py`·`rollout.py` 와 지역별 승인이 그대로 적용됩니다.
@@ -203,7 +204,7 @@ Azure 로그인은 하지 않습니다. 이 결과가 `configure-identity` 의 �
 
 | Artifact | 생성 위치 | 내용 | 보존 |
 | --- | --- | --- | --- |
-| `release-<run>` | build / promote(재개) | `release.json` (image digest, run, repo, commit; 재개 시 `source_run_id`) | 90일 |
+| `release-<run>` | build / promote(재개) | `release.json` (image digest, run, repo, commit; 재개 시 `source_run_id`, `build_run_id`, `source_commit`) | 90일 |
 | `baseline-<run>-<region>` | region | `baseline-<region>.json` – 복구의 유일한 근거 | 90일 |
 | `evidence-<run>-<region>-<attempt>` | region | `evidence\<region>\*.json` | 90일 |
 | `restore-evidence-<run>-<region>-<attempt>` | restore-region | `manual-rollback.json` 등 | 90일 |

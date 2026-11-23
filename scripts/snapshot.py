@@ -2,7 +2,7 @@
 import os
 from pathlib import Path
 
-from common import (app, app_id, az, cli_app, digest, image_valid, invariant, iso,
+from common import (PROVENANCE, app, app_id, az, cli_app, digest, image_valid, invariant, iso,
                     load, props, ready, require, revision, save, traffic, utcnow)
 
 
@@ -48,6 +48,7 @@ def main():
         "candidate_probes": load(Path(__file__).resolve().parents[1] / "infra" / "health-probes.json"),
         "candidate_termination_grace_seconds": load(
             Path(__file__).resolve().parents[1] / "infra" / "revision-policy.json")["terminationGracePeriodSeconds"],
+        **{key: release[key] for key in PROVENANCE if key in release},
     })
     print(f"Captured read-only baseline {path}; upload it BEFORE any write.")
 

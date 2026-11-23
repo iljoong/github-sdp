@@ -86,21 +86,32 @@ verified attempt-1 baseline. The receiver also logged no `workflow_run` or
 
 - A resume run executes **workflow and script code from current `main`**, which
   may differ from the source commit, while the deployed image is the source's.
-  The rebound `release.json` keeps the new `commit`, the unchanged `image` and
-  `source_run_id`. `promote_source.py` requires the source record's repository,
-  run id and commit to match the verified source run, and the image to be an
-  immutable digest `<ACR_NAME>.azurecr.io/safe-demo@sha256:...`.
-- **Resume of a resume is refused.** A resume run skipped `build` and its
-  earlier regions, so it cannot itself prove earlier-region success. The console
-  tells the operator to resume the original source instead (its audit row
-  carries `source_run_id`, or its `build` job was skipped).
+- **Commit binding.** The rebound `release.json` carries the resume run's own
+  `commit` (so `snapshot.py` keeps requiring `release.commit == GITHUB_SHA`),
+  the unchanged `image`, `source_run_id` (the immediate source run),
+  `build_run_id` (the run that built the image) and `source_commit` (that build's
+  commit). Re-rebinding a resume record keeps its `build_run_id` and
+  `source_commit`. `snapshot.py` copies these optional fields into the baseline
+  and `rollout.py` into its success evidence. `promote_source.py` requires the
+  source record's repository, run id and commit to match the verified source
+  run, the image to be an immutable digest
+  `<ACR_NAME>.azurecr.io/safe-demo@sha256:...`, and a rebound source record to
+  carry its build provenance.
+- **Resume of a resume is allowed (skipped-prefix rule).** A resume run skipped
+  `build` and the regions before its start region. Those regions count as
+  satisfied when the source is itself a resume run (its `promote` job succeeded
+  and `build` was skipped) and they form a leading prefix of `skipped` regions
+  before the source's first executed region; otherwise each earlier region must
+  have concluded `success`. A source that ran no region is refused.
 - The console only offers resume for a completed release with conclusion
-  `failure` or `cancelled` whose `build` succeeded, whose regions before the
-  start region succeeded in the latest attempt, and whose later regions were not
-  started, skipped or cancelled. Independently, `promote_source.py` checks the
-  source repository, `release.yml` path, `workflow_dispatch` event, `main`
-  branch, `completed` status and `"<caller> / rollout"` success of every earlier
-  region in the latest attempt (`filter=latest`).
+  `failure` or `cancelled` that built (or, for a resume source, promoted) its
+  image, whose regions before the start region succeeded in the latest attempt
+  or were skipped by the skipped-prefix rule, and whose later regions were not
+  started, skipped or cancelled. Every refusal reason is a static string the UI
+  translates. Independently, `promote_source.py` checks the source repository,
+  `release.yml` path, `workflow_dispatch` event, `main` branch, `completed`
+  status and, for every earlier region in the latest attempt
+  (`filter=latest`), `"<caller> / rollout"` success or the skipped-prefix rule.
 - **A start region without a source baseline** (never snapshotted) is accepted
   when its live traffic is exactly one active, Healthy revision at 100%; the
   resume run captures that revision as its baseline. With a source baseline, the

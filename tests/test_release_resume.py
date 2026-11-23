@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -63,7 +64,40 @@ class ResumeSourceTests(unittest.TestCase):
         self.assertEqual(self.verify(read), "sourcesha")
         self.assertIn(f"/repos/{REPO}/actions/runs/42/jobs?filter=latest&per_page=100", read.calls)
         self.assertEqual(self.rebind(), {"image": IMAGE, "run_id": "99", "repository": REPO,
-                                         "commit": "newsha", "source_run_id": "42"})
+                                         "commit": "newsha", "source_run_id": "42",
+                                         "build_run_id": "42", "source_commit": "sourcesha"})
+
+    def test_resume_run_source_counts_its_leading_skipped_regions_as_satisfied(self):
+        resumed = [job("build", "skipped"), job("promote"), job("korea", "skipped"),
+                   job("southeastasia / rollout"), job("westus / rollout", "failure")]
+        self.assertEqual(self.verify(reader(jobs=resumed), start="usw"), "sourcesha")
+        self.assertEqual(self.verify(reader(jobs=resumed), start="sea"), "sourcesha")
+        from_usw = [job("build", "skipped"), job("promote"), job("korea", "skipped"),
+                    job("southeastasia / rollout", "skipped"), job("westus / rollout", "failure")]
+        self.assertEqual(self.verify(reader(jobs=from_usw), start="usw"), "sourcesha")
+
+    def test_skipped_regions_are_refused_unless_a_successful_resume_skipped_them_before_its_first_region(self):
+        refused = {
+            "built source": [job("build"), job("korea", "skipped"), job("southeastasia / rollout"),
+                             job("westus / rollout", "failure")],
+            "promote failed": [job("build", "skipped"), job("promote", "failure"), job("korea", "skipped"),
+                               job("southeastasia", "skipped"), job("westus", "skipped")],
+            "nothing executed": [job("build", "skipped"), job("promote"), job("korea", "skipped"),
+                                 job("southeastasia", "skipped"), job("westus", "skipped")],
+            "failed first region": [job("build", "skipped"), job("promote"), job("korea", "skipped"),
+                                    job("southeastasia / rollout", "failure"), job("westus", "skipped")]}
+        for message, jobs in refused.items():
+            with self.subTest(message), self.assertRaisesRegex(RuntimeError, "region"):
+                self.verify(reader(jobs=jobs), start="usw")
+
+    def test_rebinding_a_resume_record_keeps_the_original_build_provenance(self):
+        resumed = source_release(source_run_id="30", build_run_id="30", source_commit="buildsha")
+        self.assertEqual(self.rebind(resumed), {"image": IMAGE, "run_id": "99", "repository": REPO,
+                                                "commit": "newsha", "source_run_id": "42",
+                                                "build_run_id": "30", "source_commit": "buildsha"})
+        for change in ({"build_run_id": "3x"}, {"source_commit": ""}, {"build_run_id": None}):
+            with self.subTest(change), self.assertRaisesRegex(RuntimeError, "provenance"):
+                self.rebind({**resumed, **change})
 
     def test_source_must_be_completed_main_dispatch_of_full_release_in_this_repo(self):
         cases = {"repository": {"repository": {"full_name": "other/repo"}},
@@ -130,6 +164,63 @@ class ResumeSourceTests(unittest.TestCase):
             finally:
                 os.chdir(cwd)
             self.assertEqual(json.loads((tmp / "release.json").read_text())["source_run_id"], "42")
+
+
+class ResumeProvenanceTests(unittest.TestCase):
+    """The rebound record's source/build provenance reaches the baseline and rollout success evidence."""
+
+    PROVENANCE = {"source_run_id": "42", "build_run_id": "30", "source_commit": "buildsha"}
+
+    def capture(self, release):
+        import common
+        import snapshot
+        app = {"properties": {"configuration": {"activeRevisionsMode": "Multiple", "ingress": {
+            "external": True, "transport": "auto", "traffic": [{"revisionName": "myapp--old", "weight": 100}]}},
+            "template": {}}}
+        stable = {"properties": {"active": True, "healthState": "Healthy", "provisioningState": "Provisioned",
+                                 "runningState": "Running", "template": {
+                                     "scale": {"minReplicas": 1}, "containers": [{"name": "web", "image": IMAGE}]}}}
+        env = {"GITHUB_RUN_ATTEMPT": "1", "REGION": "kr", "GITHUB_REPOSITORY": REPO, "GITHUB_RUN_ID": "99",
+               "GITHUB_SHA": "newsha", "CONTAINER_APP": "myapp", "RESOURCE_GROUP": "group"}
+        with patch.dict(os.environ, env), patch.object(snapshot.Path, "exists", return_value=False), \
+             patch.object(snapshot, "load", side_effect=lambda path: (
+                 release if path == "release.json" else common.load(path))), \
+             patch.object(snapshot, "app", return_value=app), patch.object(snapshot, "revision", return_value=stable), \
+             patch.object(snapshot, "az", return_value=[]), patch.object(snapshot, "app_id", return_value="/app"), \
+             patch.object(snapshot, "save") as save, patch("builtins.print"):
+            snapshot.main()
+        return save.call_args.args[1]
+
+    def succeed(self, baseline):
+        import rollout
+        with patch.dict(os.environ, {"GITHUB_RUN_ATTEMPT": "1", "GITHUB_RUN_ID": "99", "REGION": "kr"}), \
+             patch.object(rollout, "verify_context"), patch.object(rollout, "guarded_state"), \
+             patch.object(rollout, "baseline_preflight"), patch.object(rollout, "cli_app", return_value=[]), \
+             patch.object(rollout, "save") as save, patch.object(rollout, "candidate_owned"), \
+             patch.object(rollout, "ready", return_value=True), patch.object(rollout, "wait_ready"), \
+             patch.object(rollout, "bake", return_value={}), patch.object(rollout, "az", side_effect=[[], {}]), \
+             patch.object(rollout, "expected_candidate", return_value={}), patch.object(rollout, "set_traffic"):
+            rollout.deploy(baseline, "production")
+        return next(call.args[1] for call in save.call_args_list if Path(call.args[0]).name == "success.json")
+
+    def test_baseline_and_success_evidence_carry_resume_provenance(self):
+        release = {"image": IMAGE, "run_id": "99", "repository": REPO, "commit": "newsha", **self.PROVENANCE}
+        baseline = self.capture(release)
+        self.assertEqual({key: baseline.get(key) for key in self.PROVENANCE}, self.PROVENANCE)
+        self.assertEqual(baseline["commit"], "newsha")
+        success = self.succeed(baseline)
+        self.assertEqual({key: success.get(key) for key in self.PROVENANCE}, self.PROVENANCE)
+
+    def test_built_release_has_no_provenance_fields(self):
+        baseline = self.capture({"image": IMAGE, "run_id": "99", "repository": REPO, "commit": "newsha"})
+        self.assertFalse(set(self.PROVENANCE) & set(baseline))
+        self.assertFalse(set(self.PROVENANCE) & set(self.succeed(baseline)))
+
+    def test_snapshot_still_requires_the_record_bound_to_this_run_and_commit(self):
+        for change in ({"commit": "buildsha"}, {"run_id": "42"}):
+            with self.subTest(change), self.assertRaisesRegex(RuntimeError, "Wrong release"):
+                self.capture({"image": IMAGE, "run_id": "99", "repository": REPO, "commit": "newsha",
+                              **self.PROVENANCE, **change})
 
 
 WORKFLOWS = ROOT / ".github" / "workflows"

@@ -120,7 +120,7 @@ Non-goals
 | Deploy | `release.yml` on `main`, profile `demo`/`production` | Run ID obtained from `return_run_details`; ambiguous response is never re-dispatched or guessed |
 | Approve/reject | GitHub App protection rule for `prod-{kr,sea,usw}` and `prod-rollback-*` | Gate bound to a console-started run and operation; approver differs from requester; pending state confirmed from the current attempt's jobs and a protection-rule row received at or after that attempt started; decision claim per run attempt. A deploy run's gate on attempt > 1 is a re-run gate: reject only |
 | Cancel | GitHub run cancel | In-progress source release only; cancel success is not reported as recovery |
-| Resume | `release.yml` on `main` with `profile`, `resume_from_run_id`, `start_region` | Completed source release (any attempt) with conclusion `failure`/`cancelled`, built image, not itself a resume; start region = first region not successful in the latest attempt, all earlier regions successful, later regions not run; start region live traffic exactly one active Healthy revision at 100% (the source baseline's stable or candidate when a baseline exists). Profile from the source's audit row (default `production`); client sends neither region nor profile |
+| Resume | `release.yml` on `main` with `profile`, `resume_from_run_id`, `start_region` | Completed source release (any attempt) with conclusion `failure`/`cancelled` and a built image (or, for a source that is itself a resume run, a successful `promote`); start region = first region not successful in the latest attempt, all earlier regions successful or, for a resume source, a leading prefix of `skipped` regions before its first executed region; later regions not run; start region live traffic exactly one active Healthy revision at 100% (the source baseline's stable or candidate when a baseline exists). Profile from the source's audit row (default `production`); client sends neither region nor profile |
 | Regional rollback | `restore.yml` for one region | Completed source run (any run attempt), valid attempt-1 `baseline-<run>-<region>` evidence, stable revision active; workflow drift/health checks remain final |
 | Demo retire | `demo-retire.yml` | Completed `demo` run with explicit profile evidence, attempt-1 region success evidence, candidate at 100%, and no later run attempt started that region's rollout; confirmation states that rollback then requires reactivation |
 
@@ -141,7 +141,9 @@ Non-goals
 - Resume runs: `release.yml` skips `build` and runs `promote` (environment
   `build`), which verifies the source with `scripts/promote_source.py` and
   republishes its `release.json` with the unchanged image digest, the new run id
-  and commit, and `source_run_id`. Regions run from `start_region` onward. The
+  and commit, `source_run_id`, and the original build's `build_run_id` and
+  `source_commit` (kept when the source is itself a resume). The baseline and
+  rollout success evidence copy these fields. Regions run from `start_region` onward. The
   run is recorded as a deploy-kind audit row with `source_run_id`, so normal
   per-region approval with requester separation applies. Workflow code comes
   from current `main`; the image comes from the source.
